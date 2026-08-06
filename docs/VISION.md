@@ -29,7 +29,8 @@ intelligence of a modern AI finance app.**
 
 ## What exists today
 
-A complete, tested v1 (no AI yet, deliberately):
+A complete, tested v1 — deterministic core plus the first rung of the AI
+ladder (receipt extraction, shipped August 2026):
 
 - Nine pages: dashboard, transactions, recurring, subscriptions, budgets,
   goals, documents, rules, settings — with a first-run onboarding wizard and
@@ -38,6 +39,10 @@ A complete, tested v1 (no AI yet, deliberately):
   an auditable recurring/subscription detection algorithm, a rules engine,
   strict never-guess CSV parsing (ambiguity always asks the user).
 - Documents vault: original receipt/statement bytes stored in R2.
+- AI receipt extraction (off by default): Workers AI in the user's own
+  Cloudflare account, or bring-your-own-key Anthropic. Suggestion-only —
+  per-field confidence, a review form, and no transaction until the user
+  confirms.
 - A full data-erase flow, empty-start guarantee (no sample data, ever), and a
   `/api/drive-sync` contract ready for scheduled import runners.
 
@@ -80,20 +85,35 @@ comfortable letting AI make financial decisions autonomously).
 1. **Categorization that learns from corrections.** AI fallback where
    deterministic rules don't match; user corrections get promoted into new
    rules. The existing rules engine stays authoritative.
-2. **Receipt & statement extraction.** The bytes are already in R2; add an
-   extraction step (OCR + schema-constrained LLM, per-field confidence,
-   review queue for anything uncertain). Two paths from one feature:
-   **Workers AI** (inference inside the user's own Cloudflare account — the
-   privacy-first default) and **bring-your-own-key** frontier models for
-   maximum accuracy. Cost: cents per document or less.
-3. **Cash-flow forecasting** on top of the recurring-detection engine — the
+2. **Receipt extraction.** ✅ *Shipped.* The bytes were already in R2; a
+   schema-constrained LLM reads one document into a suggested transaction
+   (merchant, date, total, category) with per-field confidence, and the user
+   confirms it in a review form. Two paths from one feature: **Workers AI**
+   (inference inside the user's own Cloudflare account — the privacy-first
+   default) and **bring-your-own-key** frontier models for maximum accuracy.
+   Cents per document or less.
+3. **PDF statement extraction — many transactions from one document.**
+   Receipt extraction handles the one-merchant-one-total shape; a bank or
+   card statement is a *table* of dozens of rows, so it needs its own
+   pipeline: page-aware reading, row-level extraction, and a review screen
+   that triages a whole batch at once rather than a single form. CSV
+   statements already import deterministically and stay the recommended
+   path — this closes the gap for banks that only hand out PDFs.
+   Non-negotiables carried over: nothing is inserted without confirmation,
+   the existing duplicate fingerprint applies per row, unreadable rows are
+   reported and skipped rather than guessed, and per-row confidence drives
+   what the review screen puts in front of the user first. Feasibility note:
+   this is the first feature where per-document cost and context limits
+   matter (a 12-page statement is not a receipt) — expect chunking by page
+   and a hard row cap per run.
+4. **Cash-flow forecasting** on top of the recurring-detection engine — the
    numeric projection stays deterministic and auditable; AI narrates
    scenarios in plain language.
-4. **Natural-language search / MCP.** Read-only. Expose the user's data as
+5. **Natural-language search / MCP.** Read-only. Expose the user's data as
    an MCP server so they can point *their own* AI client at *their own*
    finances — "chat with your money" without the data ever leaving their
    control.
-5. **Proactive briefings & anomaly alerts** — last, once 1–3 generate the
+6. **Proactive briefings & anomaly alerts** — last, once 1–4 generate the
    signal that makes alerts useful instead of noisy.
 
 ### Phase 3 — Sustainability and the business wedge

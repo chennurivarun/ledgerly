@@ -97,19 +97,20 @@ secret (`npx wrangler secret put SYNC_TOKEN`) to require a bearer token.
 
 1. **Your data stays in your infrastructure.** Default deployment is your
    own Cloudflare account; nothing phones home.
-2. **Deterministic money math, AI assist later.** Totals, dedupe, and
-   detection are deterministic and tested. Planned AI features
-   ([roadmap](docs/VISION.md)) suggest — they never silently write.
+2. **Deterministic money math, AI assist.** Totals, dedupe, and detection are
+   deterministic and tested. AI features suggest — they never silently write.
 3. **Never guess.** Ambiguity asks; uncertainty goes to review.
 4. **Empty starts empty.** No sample data, no fake trends, no dark patterns.
 
 ## Roadmap
 
-The direction — privacy-first AI finance management (receipt extraction and
-categorization that run *inside your own account* via Workers AI, cash-flow
-forecasting, read-only MCP so your own AI client can chat with your data) —
-is laid out in **[docs/VISION.md](docs/VISION.md)**, with the market research
-behind it in [docs/research/](docs/research/).
+Receipt extraction is shipped. Next up: **PDF bank-statement extraction**
+(many transactions from one document — CSV statements already import
+deterministically), then categorization that learns from your corrections,
+cash-flow forecasting, and a read-only MCP server so your own AI client can
+chat with your finances. The full direction is in
+**[docs/VISION.md](docs/VISION.md)**, with the market research behind it in
+[docs/research/](docs/research/).
 
 ## Contributing
 
