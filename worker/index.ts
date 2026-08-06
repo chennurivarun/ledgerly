@@ -11,6 +11,12 @@ import {
 } from '../shared/types';
 import { deleteDocument, downloadDocument, uploadDocuments } from './documents';
 import { readDriveStatus, runDriveSync } from './drive';
+import {
+  confirmExtraction,
+  dismissExtraction,
+  readExtractions,
+  runExtraction,
+} from './extractions';
 import { applyPreferences } from './preferences';
 import { readDocuments, readRules, readTags, readTransactions } from './queries';
 import { ensureSchema } from './schema';
@@ -57,7 +63,10 @@ app.get('/api/state', async (c) => {
     readSettings(db),
     readDocuments(db),
   ]);
-  const payload: StatePayload = { transactions, tags, rules, settings, documents };
+  // Extractions are scoped to the documents just returned, so this read is
+  // bounded by the same cap rather than growing with the vault.
+  const extractions = await readExtractions(db, documents.map((d) => d.id));
+  const payload: StatePayload = { transactions, tags, rules, settings, documents, extractions };
   return c.json(payload);
 });
 
@@ -72,8 +81,11 @@ app.delete('/api/state', async (c) => {
   await db.batch([
     db.prepare('DELETE FROM transactions'),
     db.prepare('DELETE FROM documents'),
+    db.prepare('DELETE FROM extractions'),
     db.prepare('DELETE FROM rules'),
     db.prepare('DELETE FROM tags'),
+    // Clears the stored BYOK key with everything else — it lives in this
+    // table under `aiApiKeySecret` (worker/settingsStore.ts).
     db.prepare('DELETE FROM settings'),
   ]);
 
@@ -210,6 +222,24 @@ app.get('/api/documents/:id/download', async (c) => downloadDocument(c.env, c.re
 
 app.delete('/api/documents/:id', async (c) => {
   await deleteDocument(c.env, c.req.param('id'));
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// AI extraction (spec §4.6, VISION.md phase 2). Suggestions only — /extract
+// never writes a transaction; /extraction/confirm is the only path that does.
+// ---------------------------------------------------------------------------
+
+app.post('/api/documents/:id/extract', async (c) =>
+  c.json(await runExtraction(c.env, c.req.param('id'))),
+);
+
+app.post('/api/documents/:id/extraction/confirm', async (c) =>
+  c.json(await confirmExtraction(c.env, c.req.param('id'), await readJson(c))),
+);
+
+app.post('/api/documents/:id/extraction/dismiss', async (c) => {
+  await dismissExtraction(c.env, c.req.param('id'));
   return c.json({ ok: true });
 });
 

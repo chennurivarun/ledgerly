@@ -6,6 +6,15 @@ import { defaultSettings, type Settings } from '../shared/types';
 export const PROCESSED_FILE_IDS_KEY = 'processedFileIds';
 export const MAX_PROCESSED_FILE_IDS = 5000;
 
+/**
+ * Where the BYOK API key is stored. Deliberately NOT a key in
+ * `defaultSettings()`: `readSettings` copies a stored row into the payload only
+ * when its key already exists on the defaults object, so a key parked here can
+ * never be echoed by /api/state or /api/preferences, no matter what a future
+ * caller does. `Settings.aiKeySet` is derived from its presence instead.
+ */
+export const AI_KEY_SECRET_KEY = 'aiApiKeySecret';
+
 interface SettingRow {
   key: string;
   value: string;
@@ -24,10 +33,30 @@ function shapeOk(value: unknown, fallback: unknown): boolean {
   return typeof value === typeof fallback;
 }
 
+/** A stored secret is only a secret while it is a non-empty string. */
+function decodeSecret(rawValue: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawValue);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'string') return null;
+  const trimmed = parsed.trim();
+  return trimmed || null;
+}
+
 export async function readSettings(db: D1Database): Promise<Settings> {
   const { results } = await db.prepare('SELECT key, value FROM settings').all<SettingRow>();
   const out = defaultSettings() as unknown as Record<string, unknown>;
+  let keyStored = false;
   for (const row of results ?? []) {
+    // The BYOK key is the one row we read but never copy: only the boolean
+    // "is there one" escapes this loop.
+    if (row.key === AI_KEY_SECRET_KEY) {
+      keyStored = decodeSecret(row.value) !== null;
+      continue;
+    }
     if (!(row.key in out)) continue; // internal keys stay out of the client payload
     let parsed: unknown;
     try {
@@ -37,7 +66,41 @@ export async function readSettings(db: D1Database): Promise<Settings> {
     }
     if (shapeOk(parsed, out[row.key])) out[row.key] = parsed;
   }
+  // Always derived, never read from its own row — a stored `aiKeySet` could
+  // drift out of step with the actual secret, and this flag gates the UI's
+  // "key saved" state.
+  out.aiKeySet = keyStored;
   return out as unknown as Settings;
+}
+
+/**
+ * Last line of defence before settings are serialized. `readSettings` already
+ * cannot emit the secret; this makes that a property of the response builder
+ * too, so adding `aiApiKeySecret` to `defaultSettings()` some day would not
+ * silently start leaking it.
+ */
+export function redactAiSecret(settings: Settings): Settings {
+  const copy: Record<string, unknown> = { ...(settings as unknown as Record<string, unknown>) };
+  delete copy[AI_KEY_SECRET_KEY];
+  return copy as unknown as Settings;
+}
+
+/** The plaintext BYOK key, or null when none is stored. Never leaves the worker. */
+export async function readAiApiKey(db: D1Database): Promise<string | null> {
+  const row = await db
+    .prepare('SELECT value FROM settings WHERE key = ?')
+    .bind(AI_KEY_SECRET_KEY)
+    .first<{ value: string }>();
+  return row ? decodeSecret(row.value) : null;
+}
+
+export async function writeAiApiKey(db: D1Database, key: string): Promise<void> {
+  await writeSettings(db, { [AI_KEY_SECRET_KEY]: key });
+}
+
+/** Removing the row is what makes `aiKeySet` false again. */
+export async function clearAiApiKey(db: D1Database): Promise<void> {
+  await db.prepare('DELETE FROM settings WHERE key = ?').bind(AI_KEY_SECRET_KEY).run();
 }
 
 /** Upsert only the given keys — unrelated settings are never touched (spec §4.5). */
