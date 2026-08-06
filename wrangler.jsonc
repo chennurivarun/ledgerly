@@ -23,14 +23,15 @@
       "bucket_name": "ledgerly-documents"
     }
   ],
-  // Workers AI powers the in-account receipt-extraction provider. The binding
-  // is commented out by default because `vite dev` refuses to start with it
-  // present unless you are authenticated to Cloudflare (`npx wrangler login`
-  // or CLOUDFLARE_API_TOKEN) — and local-first dev must work with neither.
-  // Uncomment to enable the "Workers AI" provider (dev needs auth; deploys
-  // always have it). The Anthropic BYOK provider works without this binding.
-  // "ai": {
-  //   "binding": "AI"
-  // },
+  "ai": {
+    // Workers AI has no local simulator; wrangler treats this binding as
+    // always-remote ("remote" here just acknowledges that and silences a
+    // startup warning). In `npm run dev` the binding stays disconnected
+    // (errors only when actually called) so a clone without Cloudflare
+    // credentials still boots; opt in via LEDGERLY_REMOTE_BINDINGS=true —
+    // see vite.config.ts.
+    "binding": "AI",
+    "remote": true
+  },
   "observability": { "enabled": true }
 }

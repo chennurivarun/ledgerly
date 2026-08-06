@@ -47,7 +47,12 @@ npm run dev
 ```
 
 Open http://localhost:5173. Everything runs locally (Workers runtime with
-local D1/R2 via miniflare); data persists in `.wrangler/state/`.
+local D1/R2 via miniflare); data persists in `.wrangler/state/`. No
+Cloudflare account is needed — the only feature that requires one is the
+Workers AI receipt-extraction provider, which has no local simulator and is
+disconnected in local dev unless you opt in with
+`LEDGERLY_REMOTE_BINDINGS=true` after authenticating (`npx wrangler login`
+or `CLOUDFLARE_API_TOKEN`).
 
 ## Deploy to your own Cloudflare account
 
@@ -68,10 +73,11 @@ app needs.
 Settings → AI lets Ledgerly suggest transactions from stored receipts. Two
 providers, off by default:
 
-- **Workers AI** — inference runs inside your own Cloudflare account.
-  Uncomment the `ai` binding in [wrangler.jsonc](wrangler.jsonc) to enable it
-  (local dev then requires `npx wrangler login`; deployed Workers always
-  qualify).
+- **Workers AI** — processed by Workers AI inside your own Cloudflare
+  account, never sent to a third-party vendor. Works automatically on
+  deployed Workers; in local dev it needs Cloudflare auth plus
+  `LEDGERLY_REMOTE_BINDINGS=true` (see [vite.config.ts](vite.config.ts)) —
+  without that, everything else still runs fully locally.
 - **Anthropic (bring your own key)** — higher accuracy; sends document images
   to Anthropic's API under your key. The key is stored in your database,
   write-only, and never displayed again. Works in local dev with no

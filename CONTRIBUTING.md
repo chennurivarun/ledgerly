@@ -28,6 +28,14 @@ npm run build      # must succeed
 
 Local data persists in `.wrangler/state/` between runs.
 
+No Cloudflare account or credentials are needed for any of the above. The
+one exception is the Workers AI binding (`AI`), which has no local
+simulator: in local dev it is present but disconnected, so only the
+Workers AI extraction provider errors if invoked — every other route and
+provider works. To exercise real Workers AI in dev, authenticate
+(`npx wrangler login` or `CLOUDFLARE_API_TOKEN`) and run with
+`LEDGERLY_REMOTE_BINDINGS=true` (see [vite.config.ts](vite.config.ts)).
+
 ## Architecture in one paragraph
 
 React SPA in `src/` talks only to `src/api.ts` → a Cloudflare Worker in
