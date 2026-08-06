@@ -14,6 +14,19 @@ import {
 export const LOW_CONFIDENCE_THRESHOLD = 0.6;
 
 /**
+ * Rounds a numeric amount string to integer cents; null when not a real
+ * number. Single source of truth for "does this amount actually round to at
+ * least one cent" — a sub-cent value like "0.004" passes a naive `> 0` check
+ * but rounds to 0 once stored, so validation and the payload builder must
+ * agree on the same rounding. Shared by validateExtractionDraft below and by
+ * statementHelpers.ts's identical amount-validity check.
+ */
+export function amountCents(amount: string): number | null {
+  const n = Number(amount);
+  return Number.isFinite(n) ? Math.round(n * 100) : null;
+}
+
+/**
  * True when a field is missing or the model wasn't confident — draws the eye,
  * never blocks confirmation. A missing/non-finite confidence (malformed data
  * crossing the JSON boundary — undefined, NaN, Infinity) is treated as LOW,
@@ -93,8 +106,11 @@ export function seedExtractionDraft(
 export function validateExtractionDraft(draft: ExtractionDraft): string | null {
   if (!draft.merchant.trim()) return 'Enter a merchant.';
   if (!draft.date || !isRealDateISO(draft.date)) return 'Choose a real date.';
-  const total = Number(draft.total);
-  if (!Number.isFinite(total) || total <= 0) return 'Enter a total greater than 0.';
+  // Guard against sub-cent amounts (e.g. "0.004"): they pass a naive `> 0`
+  // check but round to 0 once stored as cents (buildTxInputFromDraft below
+  // rounds the same way) — validate the rounding the payload actually uses.
+  const cents = amountCents(draft.total);
+  if (cents === null || cents < 1) return 'Enter a total greater than 0.';
   if (!draft.category) return 'Choose a category.';
   if (!draft.account) return 'Choose an account.';
   return null;

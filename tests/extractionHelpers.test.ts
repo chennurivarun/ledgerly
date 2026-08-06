@@ -190,6 +190,15 @@ describe('validateExtractionDraft', () => {
     expect(validateExtractionDraft({ ...valid, total: 'abc' })).toBe('Enter a total greater than 0.');
   });
 
+  it('rejects a sub-cent total that rounds to 0 — a naive `> 0` check would miss this', () => {
+    expect(validateExtractionDraft({ ...valid, total: '0.004' })).toBe('Enter a total greater than 0.');
+    expect(validateExtractionDraft({ ...valid, total: '0.001' })).toBe('Enter a total greater than 0.');
+  });
+
+  it('accepts a total that rounds to at least one cent', () => {
+    expect(validateExtractionDraft({ ...valid, total: '0.01' })).toBeNull();
+  });
+
   it('requires a category and an account', () => {
     expect(validateExtractionDraft({ ...valid, category: '' })).toBe('Choose a category.');
     expect(validateExtractionDraft({ ...valid, account: '' })).toBe('Choose an account.');

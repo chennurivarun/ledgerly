@@ -13,6 +13,7 @@ import {
   type Settings,
   type StatementConfirmInput,
   type StatementExtraction,
+  type StatementJobStatus,
   type Tag,
   type Transaction,
   type TxInput,
@@ -88,6 +89,38 @@ function upsertExtraction(list: ExtractionResult[], next: ExtractionResult): Ext
   return [...rest, next];
 }
 
+const REVIEWABLE_STATEMENT_STATUSES: StatementJobStatus[] = ['pending', 'suggested', 'partial'];
+
+/**
+ * Merges a fresh /api/state statements payload against the current local
+ * list. /api/state only carries rows for the newest 10 reviewable jobs — a
+ * refreshQuiet fired while a job is mid-triage can legitimately return that
+ * job as { status: 'suggested', rows: [], rowCount > 0 } once a newer job
+ * pushes it out of that window. A naive replace would then prune every
+ * in-progress draft in the review modal (edits destroyed, silently).
+ *
+ * When the server elides rows this way (reviewable status, empty rows, but
+ * a real rowCount) AND the local copy still has rows for that document,
+ * keep the local rows — the server didn't delete them, it just didn't
+ * re-send them. Every other case takes the incoming payload as-is: a
+ * settled status (confirmed/dismissed/failed) always wins, since that's how
+ * post-confirm pruning actually removes rows from the review table; a
+ * genuinely empty new job (rowCount 0) has nothing to preserve; and a
+ * non-elided reviewable job (incoming actually has rows) is simply fresher.
+ */
+export function mergeStatements(
+  local: StatementExtraction[],
+  incoming: StatementExtraction[],
+): StatementExtraction[] {
+  return incoming.map((next) => {
+    const elided =
+      REVIEWABLE_STATEMENT_STATUSES.includes(next.status) && next.rows.length === 0 && next.rowCount > 0;
+    if (!elided) return next;
+    const prevLocal = local.find((s) => s.documentId === next.documentId);
+    return prevLocal && prevLocal.rows.length > 0 ? { ...next, rows: prevLocal.rows } : next;
+  });
+}
+
 let toastSeq = 1;
 
 export const useStore = create<AppStore>((set, get) => ({
@@ -107,7 +140,7 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ loadError: null });
     try {
       const s = await api.getState();
-      set({
+      set((st) => ({
         loaded: true,
         transactions: sortTransactions(s.transactions),
         tags: s.tags,
@@ -115,8 +148,8 @@ export const useStore = create<AppStore>((set, get) => ({
         settings: applySettings(s.settings),
         documents: s.documents,
         extractions: s.extractions ?? [],
-        statements: s.statements ?? [],
-      });
+        statements: mergeStatements(st.statements, s.statements ?? []),
+      }));
     } catch (e) {
       set({ loadError: e instanceof Error ? e.message : 'Failed to load your data.' });
     }
@@ -253,15 +286,15 @@ export const useStore = create<AppStore>((set, get) => ({
   async refreshQuiet() {
     try {
       const s = await api.getState();
-      set({
+      set((st) => ({
         transactions: sortTransactions(s.transactions),
         tags: s.tags,
         rules: s.rules,
         settings: applySettings(s.settings),
         documents: s.documents,
         extractions: s.extractions ?? [],
-        statements: s.statements ?? [],
-      });
+        statements: mergeStatements(st.statements, s.statements ?? []),
+      }));
     } catch {
       /* keep current state */
     }
