@@ -1,5 +1,8 @@
 # Ledgerly
 
+[![CI](https://github.com/chennurivarun/ledgerly/actions/workflows/ci.yml/badge.svg)](https://github.com/chennurivarun/ledgerly/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+
 **Private, self-hosted personal finance — your data in your own Cloudflare
 account, never anyone else's.**
 
