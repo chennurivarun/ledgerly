@@ -4,6 +4,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import {
+  NEEDS_REVIEW,
   WIPE_CONFIRMATION,
   type BatchInsertResult,
   type StatePayload,
@@ -27,6 +28,14 @@ import {
   readStatements,
   runStatementExtraction,
 } from './statements';
+import {
+  buildSuggestionRuleText,
+  readRuleSuggestions,
+  recordCategoryCorrection,
+  ruleCoversPair,
+  suggestionKey,
+  validateSuggestionAction,
+} from './suggestions';
 import {
   insertTransactions,
   MAX_BATCH,
@@ -72,9 +81,12 @@ app.get('/api/state', async (c) => {
   // Extractions and statement jobs are scoped to the documents just returned,
   // so these reads are bounded by the same cap rather than growing with the vault.
   const documentIds = documents.map((d) => d.id);
-  const [extractions, statements] = await Promise.all([
+  const [extractions, statements, ruleSuggestions] = await Promise.all([
     readExtractions(db, documentIds),
     readStatements(db, documentIds),
+    // Reuses the rules/settings just read; its own reads are bounded
+    // (CORRECTIONS_SCAN_LIMIT), so state stays O(1)-ish as corrections grow.
+    readRuleSuggestions(db, rules, settings.categories),
   ]);
   const payload: StatePayload = {
     transactions,
@@ -84,6 +96,7 @@ app.get('/api/state', async (c) => {
     documents,
     extractions,
     statements,
+    ruleSuggestions,
   };
   return c.json(payload);
 });
@@ -102,6 +115,8 @@ app.delete('/api/state', async (c) => {
     db.prepare('DELETE FROM extractions'),
     db.prepare('DELETE FROM statement_extractions'),
     db.prepare('DELETE FROM statement_rows'),
+    db.prepare('DELETE FROM category_corrections'),
+    db.prepare('DELETE FROM rule_suggestion_dismissals'),
     db.prepare('DELETE FROM rules'),
     db.prepare('DELETE FROM tags'),
     // Clears the stored BYOK key with everything else — it lives in this
@@ -177,12 +192,14 @@ app.patch('/api/transactions/:id', async (c) => {
   const sets: string[] = [];
   const binds: (string | number)[] = [];
   let newTags: string[] | null = null;
+  let newCategory: string | null = null;
 
   if (body.category !== undefined) {
     const category = typeof body.category === 'string' ? body.category.trim() : '';
     if (!category) throw new ApiFail(400, 'Choose a category.');
     sets.push('category = ?');
     binds.push(category);
+    newCategory = category;
   }
   if (body.tags !== undefined) {
     newTags = normalizeNames(body.tags);
@@ -193,9 +210,9 @@ app.patch('/api/transactions/:id', async (c) => {
   if (sets.length === 0) throw new ApiFail(400, 'Provide a category and/or tags to update.');
 
   const exists = await db
-    .prepare('SELECT id FROM transactions WHERE id = ?')
+    .prepare('SELECT id, category FROM transactions WHERE id = ?')
     .bind(id)
-    .first<{ id: string }>();
+    .first<{ id: string; category: string }>();
   if (!exists) throw new ApiFail(404, 'That transaction no longer exists.');
 
   await db
@@ -206,6 +223,13 @@ app.patch('/api/transactions/:id', async (c) => {
 
   const saved = await readTransaction(db, id);
   if (!saved) throw new ApiFail(404, 'That transaction no longer exists.');
+
+  // A manual recategorization is correction-learning evidence (VISION.md
+  // phase-2 item 1). Only this PATCH path records — never inserts, imports or
+  // statement confirms — and parking a row back at 'Needs review' teaches nothing.
+  if (newCategory !== null && newCategory !== exists.category && newCategory !== NEEDS_REVIEW) {
+    await recordCategoryCorrection(db, saved.merchant, newCategory);
+  }
   return c.json(saved);
 });
 
@@ -222,6 +246,57 @@ app.delete('/api/transactions/:id', async (c) => {
 app.put('/api/preferences', async (c) => {
   const result = await applyPreferences(c.env.DB, await readJson(c));
   return c.json(result);
+});
+
+// ---------------------------------------------------------------------------
+// Rule suggestions (VISION.md phase-2 item 1). Suggestions are computed, never
+// stored — /accept is the only path that turns one into a real rule.
+// ---------------------------------------------------------------------------
+
+function readSuggestionAction(body: unknown): { merchant: string; category: string } {
+  const action = validateSuggestionAction(body);
+  if (!action.ok) throw new ApiFail(400, action.error);
+  return action;
+}
+
+app.post('/api/rule-suggestions/accept', async (c) => {
+  const db = c.env.DB;
+  const { merchant, category } = readSuggestionAction(await readJson(c));
+
+  // Idempotent: when an enabled rule already sends this merchant to this
+  // category (same applyRules check the suggestion filter uses), accepting
+  // again succeeds without creating a duplicate.
+  if (!ruleCoversPair(merchant, category, await readRules(db))) {
+    const text = buildSuggestionRuleText(merchant, category);
+    if (!text) {
+      throw new ApiFail(
+        400,
+        'This merchant and category cannot be turned into a rule automatically. Create the rule yourself on the Rules page.',
+      );
+    }
+    await db
+      .prepare('INSERT INTO rules (id, whenText, thenText, enabled, createdAt) VALUES (?, ?, ?, 1, ?)')
+      .bind(crypto.randomUUID(), text.whenText, text.thenText, new Date().toISOString())
+      .run();
+  }
+
+  // Accepting outranks an old dismissal of the same pair.
+  await db
+    .prepare('DELETE FROM rule_suggestion_dismissals WHERE key = ?')
+    .bind(suggestionKey(merchant, category))
+    .run();
+  return c.json({ rules: await readRules(db) });
+});
+
+app.post('/api/rule-suggestions/dismiss', async (c) => {
+  const { merchant, category } = readSuggestionAction(await readJson(c));
+  await c.env.DB.prepare(
+    `INSERT INTO rule_suggestion_dismissals (key, createdAt) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET createdAt = excluded.createdAt`,
+  )
+    .bind(suggestionKey(merchant, category), new Date().toISOString())
+    .run();
+  return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
