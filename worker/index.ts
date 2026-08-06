@@ -22,6 +22,12 @@ import { readDocuments, readRules, readTags, readTransactions } from './queries'
 import { ensureSchema } from './schema';
 import { readSettings, writeSettings } from './settingsStore';
 import {
+  confirmStatementRows,
+  dismissStatement,
+  readStatements,
+  runStatementExtraction,
+} from './statements';
+import {
   insertTransactions,
   MAX_BATCH,
   readTransaction,
@@ -63,10 +69,22 @@ app.get('/api/state', async (c) => {
     readSettings(db),
     readDocuments(db),
   ]);
-  // Extractions are scoped to the documents just returned, so this read is
-  // bounded by the same cap rather than growing with the vault.
-  const extractions = await readExtractions(db, documents.map((d) => d.id));
-  const payload: StatePayload = { transactions, tags, rules, settings, documents, extractions };
+  // Extractions and statement jobs are scoped to the documents just returned,
+  // so these reads are bounded by the same cap rather than growing with the vault.
+  const documentIds = documents.map((d) => d.id);
+  const [extractions, statements] = await Promise.all([
+    readExtractions(db, documentIds),
+    readStatements(db, documentIds),
+  ]);
+  const payload: StatePayload = {
+    transactions,
+    tags,
+    rules,
+    settings,
+    documents,
+    extractions,
+    statements,
+  };
   return c.json(payload);
 });
 
@@ -82,6 +100,8 @@ app.delete('/api/state', async (c) => {
     db.prepare('DELETE FROM transactions'),
     db.prepare('DELETE FROM documents'),
     db.prepare('DELETE FROM extractions'),
+    db.prepare('DELETE FROM statement_extractions'),
+    db.prepare('DELETE FROM statement_rows'),
     db.prepare('DELETE FROM rules'),
     db.prepare('DELETE FROM tags'),
     // Clears the stored BYOK key with everything else — it lives in this
@@ -242,6 +262,25 @@ app.post('/api/documents/:id/extraction/confirm', async (c) =>
 
 app.post('/api/documents/:id/extraction/dismiss', async (c) => {
   await dismissExtraction(c.env, c.req.param('id'));
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// PDF statement extraction (VISION.md phase 2 item 3). Many proposed rows from
+// one document — /statement/extract never writes a transaction; /confirm is the
+// only path that does, and only for the rows the user selected.
+// ---------------------------------------------------------------------------
+
+app.post('/api/documents/:id/statement/extract', async (c) =>
+  c.json(await runStatementExtraction(c.env, c.req.param('id'))),
+);
+
+app.post('/api/documents/:id/statement/confirm', async (c) =>
+  c.json(await confirmStatementRows(c.env, c.req.param('id'), await readJson(c))),
+);
+
+app.post('/api/documents/:id/statement/dismiss', async (c) => {
+  await dismissStatement(c.env, c.req.param('id'));
   return c.json({ ok: true });
 });
 
