@@ -1,7 +1,7 @@
 // Small shared helpers for the worker. Nothing here touches D1/R2.
 
 /** Statuses the API returns for expected, user-facing failures. */
-export type FailStatus = 400 | 401 | 404 | 413 | 500 | 503;
+export type FailStatus = 400 | 401 | 404 | 409 | 413 | 500 | 503;
 
 /**
  * An expected failure with a message safe to show the user.

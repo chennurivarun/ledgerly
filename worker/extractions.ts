@@ -192,6 +192,77 @@ async function setStatus(
     .run();
 }
 
+/**
+ * "Try again" is offered on pending and failed rows, so a second POST can land
+ * while a first run is still awaiting the model — and both would pay for a
+ * metered call. A run therefore claims the row first; a claim older than this
+ * window belongs to a run that died, not one that is running, so a crashed
+ * worker never blocks retries for good.
+ */
+export const EXTRACTION_IN_FLIGHT_MS = 2 * 60 * 1000;
+
+/**
+ * The guard's decision, kept pure so tests can pin it down: only a fresh
+ * 'pending' claim blocks a second run. A garbled stamp reads as not running —
+ * failing open costs one duplicate call, failing closed strands the document.
+ */
+export function extractionInFlight(
+  status: string,
+  updatedAt: string,
+  now: string,
+  windowMs = EXTRACTION_IN_FLIGHT_MS,
+): boolean {
+  if (status !== 'pending') return false;
+  const claimed = Date.parse(updatedAt);
+  if (Number.isNaN(claimed)) return false;
+  return Date.parse(now) - claimed < windowMs;
+}
+
+const IN_FLIGHT_MESSAGE =
+  'That extraction is already running — give it a moment to finish.';
+
+/**
+ * Flip the row to 'pending' for this run. The write is conditional on the
+ * exact row this request read, so when two POSTs race, D1's serialized writes
+ * let one claim through and the other sees no change — same 409 either way.
+ * The previous suggestion's fields survive the claim; they stay auditable
+ * while the re-run is in flight.
+ */
+async function claimExtraction(
+  db: D1Database,
+  documentId: string,
+  provider: string,
+  model: string,
+  now: string,
+): Promise<void> {
+  const current = await db
+    .prepare('SELECT status, updatedAt FROM extractions WHERE documentId = ?')
+    .bind(documentId)
+    .first<{ status: string; updatedAt: string }>();
+  if (current && extractionInFlight(current.status, current.updatedAt, now)) {
+    throw new ApiFail(409, IN_FLIGHT_MESSAGE);
+  }
+
+  const claimed = current
+    ? await db
+        .prepare(
+          `UPDATE extractions
+           SET status = 'pending', provider = ?, model = ?, error = NULL, updatedAt = ?
+           WHERE documentId = ? AND updatedAt = ?`,
+        )
+        .bind(provider, model, now, documentId, current.updatedAt)
+        .run()
+    : await db
+        .prepare(
+          `INSERT INTO extractions (${EXTRACTION_COLUMNS})
+           VALUES (?, 'pending', ?, ?, ?, NULL, ?, ?)
+           ON CONFLICT(documentId) DO NOTHING`,
+        )
+        .bind(documentId, JSON.stringify(emptyFields()), provider, model, now, now)
+        .run();
+  if (claimed.meta.changes === 0) throw new ApiFail(409, IN_FLIGHT_MESSAGE);
+}
+
 /** POST /api/documents/:id/extract */
 export async function runExtraction(env: Env, documentId: string): Promise<ExtractionResult> {
   const doc = await readDocumentRow(env.DB, documentId);
@@ -208,6 +279,14 @@ export async function runExtraction(env: Env, documentId: string): Promise<Extra
     throw new ApiFail(413, 'That file is too large to send for extraction.');
   }
 
+  // Claim before touching R2 or the model: everything above is configuration
+  // the user must fix (400s, no row behind), everything below is the run
+  // itself. A failure past this point leaves the claim standing until the
+  // window expires — acceptable, because those failures don't heal on an
+  // immediate retry anyway.
+  const now = new Date().toISOString();
+  await claimExtraction(env.DB, documentId, provider, model, now);
+
   const object = await env.BUCKET.get(doc.objectKey);
   if (!object) throw new ApiFail(404, 'The stored copy of that file is no longer available.');
   const bytes = await object.arrayBuffer();
@@ -215,7 +294,6 @@ export async function runExtraction(env: Env, documentId: string): Promise<Extra
     throw new ApiFail(413, 'That file is too large to send for extraction.');
   }
 
-  const now = new Date().toISOString();
   try {
     const fields = await extractFromDocument(env, settings, doc, bytes);
     return await upsertExtraction(env.DB, {
