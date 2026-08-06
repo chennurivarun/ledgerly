@@ -197,5 +197,13 @@ export async function deleteDocument(env: Env, id: string): Promise<void> {
     .first<{ objectKey: string }>();
   if (!row) throw new ApiFail(404, 'That document no longer exists.');
   await env.BUCKET.delete(row.objectKey);
-  await env.DB.prepare('DELETE FROM documents WHERE id = ?').bind(id).run();
+  // AI suggestion rows are keyed to this document and unreachable once it is
+  // gone (every read path scopes to live documents) — remove them with it so
+  // deleted statements don't accumulate up to 300 orphaned rows each.
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM documents WHERE id = ?').bind(id),
+    env.DB.prepare('DELETE FROM extractions WHERE documentId = ?').bind(id),
+    env.DB.prepare('DELETE FROM statement_extractions WHERE documentId = ?').bind(id),
+    env.DB.prepare('DELETE FROM statement_rows WHERE documentId = ?').bind(id),
+  ]);
 }
