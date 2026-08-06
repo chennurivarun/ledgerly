@@ -47,7 +47,12 @@ npm run dev
 ```
 
 Open http://localhost:5173. Everything runs locally (Workers runtime with
-local D1/R2 via miniflare); data persists in `.wrangler/state/`.
+local D1/R2 via miniflare); data persists in `.wrangler/state/`. No
+Cloudflare account is needed — the only feature that requires one is the
+Workers AI receipt-extraction provider, which has no local simulator and is
+disconnected in local dev unless you opt in with
+`LEDGERLY_REMOTE_BINDINGS=true` after authenticating (`npx wrangler login`
+or `CLOUDFLARE_API_TOKEN`).
 
 ## Deploy to your own Cloudflare account
 

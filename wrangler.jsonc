@@ -24,7 +24,14 @@
     }
   ],
   "ai": {
-    "binding": "AI"
+    // Workers AI has no local simulator; wrangler treats this binding as
+    // always-remote ("remote" here just acknowledges that and silences a
+    // startup warning). In `npm run dev` the binding stays disconnected
+    // (errors only when actually called) so a clone without Cloudflare
+    // credentials still boots; opt in via LEDGERLY_REMOTE_BINDINGS=true —
+    // see vite.config.ts.
+    "binding": "AI",
+    "remote": true
   },
   "observability": { "enabled": true }
 }
