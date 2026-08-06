@@ -9,11 +9,20 @@
 // the rest of the app: read useStore.getState() fresh when building a
 // payload, and disable every mutation control in a group while any write
 // from that group is in flight (rulesBusy / tagsBusy below).
+//
+// Suggestion accepts (sprint 5) join the rules group one-sidedly: an accept
+// appends to the same server-side rules array, so while one is in flight the
+// client-built rule writes (toggle/delete — their payload wouldn't include
+// the new rule yet) are blocked, and vice versa. Accept-vs-accept is safe —
+// the payload is the suggestion's own merchant/category, not client rule
+// state, and the server echoes the full rules list back — so the other
+// suggestion cards stay usable while one card's request is in flight.
 import { Pencil, Plus, SlidersHorizontal, Tags, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { Rule } from '../../shared/types';
 import { ConfirmDialog } from '../components/manage/ConfirmDialog';
 import { RuleFormModal } from '../components/manage/RuleFormModal';
+import { ruleCreatedMessage, suggestionEvidence } from '../components/manage/ruleSuggestionHelpers';
 import { TagDeleteModal } from '../components/manage/TagDeleteModal';
 import { Toggle } from '../components/manage/Toggle';
 import { useStore } from '../store';
@@ -23,8 +32,11 @@ export default function Rules() {
   const rules = useStore((s) => s.rules);
   const tags = useStore((s) => s.tags);
   const transactions = useStore((s) => s.transactions);
+  const ruleSuggestions = useStore((s) => s.ruleSuggestions);
   const updatePreferences = useStore((s) => s.updatePreferences);
   const patchTransaction = useStore((s) => s.patchTransaction);
+  const acceptRuleSuggestion = useStore((s) => s.acceptRuleSuggestion);
+  const dismissRuleSuggestion = useStore((s) => s.dismissRuleSuggestion);
   const toast = useStore((s) => s.toast);
 
   const [ruleModal, setRuleModal] = useState<'add' | Rule | null>(null);
@@ -32,7 +44,19 @@ export default function Rules() {
   const [pendingDeleteRule, setPendingDeleteRule] = useState<Rule | null>(null);
   const [deleteRuleBusy, setDeleteRuleBusy] = useState(false);
   const [deleteRuleError, setDeleteRuleError] = useState<string | null>(null);
-  const rulesBusy = togglingRuleId !== null || deleteRuleBusy;
+  // Per-suggestion in-flight marker: only that card's two buttons disable,
+  // the rest of the section stays usable (see header comment for why that
+  // is safe for accepts).
+  const [suggestionAction, setSuggestionAction] = useState<{
+    id: string;
+    kind: 'accept' | 'dismiss';
+  } | null>(null);
+  // Client-built writes to the rules array (payload derived from client
+  // state) — the original rules-group flag.
+  const ruleListWriteBusy = togglingRuleId !== null || deleteRuleBusy;
+  // What the rule-list controls key off: also true while an accept is in
+  // flight, since the accept appends to the same server-side array.
+  const rulesBusy = ruleListWriteBusy || suggestionAction?.kind === 'accept';
 
   const [tagDraft, setTagDraft] = useState('');
   const [tagAddError, setTagAddError] = useState<string | null>(null);
@@ -91,6 +115,36 @@ export default function Rules() {
       setDeleteRuleError(e instanceof Error ? e.message : 'Could not delete the rule.');
     } finally {
       setDeleteRuleBusy(false);
+    }
+  }
+
+  async function handleAcceptSuggestion(id: string) {
+    // Fresh read at call time (house rule) — the rendered object could be a
+    // stale closure if a background refresh replaced the suggestions array.
+    const suggestion = useStore.getState().ruleSuggestions.find((s) => s.id === id);
+    if (!suggestion) return;
+    setSuggestionAction({ id, kind: 'accept' });
+    try {
+      await acceptRuleSuggestion(suggestion);
+      toast('success', ruleCreatedMessage(suggestion));
+    } catch (e) {
+      toast('error', e instanceof Error ? e.message : 'Could not create the rule.');
+    } finally {
+      setSuggestionAction(null);
+    }
+  }
+
+  async function handleDismissSuggestion(id: string) {
+    const suggestion = useStore.getState().ruleSuggestions.find((s) => s.id === id);
+    if (!suggestion) return;
+    setSuggestionAction({ id, kind: 'dismiss' });
+    try {
+      await dismissRuleSuggestion(suggestion);
+      // No toast — the card disappearing is the whole story.
+    } catch (e) {
+      toast('error', e instanceof Error ? e.message : 'Could not dismiss that suggestion.');
+    } finally {
+      setSuggestionAction(null);
     }
   }
 
@@ -161,6 +215,41 @@ export default function Rules() {
 
   return (
     <div className="space-y-6">
+      {/* Rendered only when there is something to suggest — no empty-state
+          filler; the section vanishes entirely once every suggestion is
+          accepted or dismissed. */}
+      {ruleSuggestions.length > 0 && (
+        <Card title="Suggested from your corrections">
+          <ul className="divide-y divide-border">
+            {ruleSuggestions.map((suggestion) => {
+              const cardBusy = suggestionAction?.id === suggestion.id;
+              return (
+                <li key={suggestion.id} className="flex flex-wrap items-center gap-3 py-3">
+                  <p className="min-w-0 flex-1 text-sm">{suggestionEvidence(suggestion)}</p>
+                  <Button
+                    size="sm"
+                    loading={cardBusy && suggestionAction?.kind === 'accept'}
+                    disabled={cardBusy || ruleListWriteBusy}
+                    onClick={() => void handleAcceptSuggestion(suggestion.id)}
+                  >
+                    Create rule
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    loading={cardBusy && suggestionAction?.kind === 'dismiss'}
+                    disabled={cardBusy}
+                    onClick={() => void handleDismissSuggestion(suggestion.id)}
+                  >
+                    No thanks
+                  </Button>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      )}
+
       <Card
         title="Rules"
         action={
