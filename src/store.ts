@@ -10,6 +10,7 @@ import {
   type Period,
   type PreferencesUpdate,
   type Rule,
+  type RuleSuggestion,
   type Settings,
   type StatementConfirmInput,
   type StatementExtraction,
@@ -51,6 +52,7 @@ interface AppStore {
   documents: DocumentMeta[];
   extractions: ExtractionResult[];
   statements: StatementExtraction[];
+  ruleSuggestions: RuleSuggestion[];
   activeModal: ModalKind;
   toasts: Toast[];
 
@@ -79,6 +81,10 @@ interface AppStore {
   /** Import the user-selected (possibly edited) rows. */
   confirmStatementRows(id: string, input: StatementConfirmInput): Promise<BatchInsertResult>;
   dismissStatement(id: string): Promise<void>;
+  /** Turn a learned suggestion into a rule; updates the rules list. */
+  acceptRuleSuggestion(s: RuleSuggestion): Promise<void>;
+  /** Suppress a suggestion permanently for this merchant/category pair. */
+  dismissRuleSuggestion(s: RuleSuggestion): Promise<void>;
   /** Internal: background refresh that never clobbers UI on failure. */
   refreshQuiet(): Promise<void>;
 }
@@ -133,6 +139,7 @@ export const useStore = create<AppStore>((set, get) => ({
   documents: [],
   extractions: [],
   statements: [],
+  ruleSuggestions: [],
   activeModal: null,
   toasts: [],
 
@@ -149,6 +156,7 @@ export const useStore = create<AppStore>((set, get) => ({
         documents: s.documents,
         extractions: s.extractions ?? [],
         statements: mergeStatements(st.statements, s.statements ?? []),
+        ruleSuggestions: s.ruleSuggestions ?? [],
       }));
     } catch (e) {
       set({ loadError: e instanceof Error ? e.message : 'Failed to load your data.' });
@@ -294,9 +302,25 @@ export const useStore = create<AppStore>((set, get) => ({
         documents: s.documents,
         extractions: s.extractions ?? [],
         statements: mergeStatements(st.statements, s.statements ?? []),
+        ruleSuggestions: s.ruleSuggestions ?? [],
       }));
     } catch {
       /* keep current state */
     }
+  },
+
+  async acceptRuleSuggestion(sug) {
+    const res = await api.acceptRuleSuggestion({ merchant: sug.merchant, category: sug.category });
+    set((st) => ({
+      rules: res.rules,
+      ruleSuggestions: st.ruleSuggestions.filter((x) => x.id !== sug.id),
+    }));
+  },
+
+  async dismissRuleSuggestion(sug) {
+    await api.dismissRuleSuggestion({ merchant: sug.merchant, category: sug.category });
+    set((st) => ({
+      ruleSuggestions: st.ruleSuggestions.filter((x) => x.id !== sug.id),
+    }));
   },
 }));

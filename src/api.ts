@@ -9,6 +9,8 @@ import {
   type PatchTxInput,
   type PreferencesResult,
   type PreferencesUpdate,
+  type Rule,
+  type RuleSuggestionActionInput,
   type StatementConfirmInput,
   type StatementExtraction,
   type StatePayload,
@@ -120,6 +122,22 @@ export const api = {
   dismissStatement: (id: string) =>
     request<{ ok: true }>(`/api/documents/${encodeURIComponent(id)}/statement/dismiss`, {
       method: 'POST',
+    }),
+
+  /** Turn a learned suggestion into a real rule. Returns the updated rule list. */
+  acceptRuleSuggestion: (input: RuleSuggestionActionInput) =>
+    request<{ rules: Rule[] }>('/api/rule-suggestions/accept', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify(input),
+    }),
+
+  /** Suppress a suggestion; it will not be offered again for this pair. */
+  dismissRuleSuggestion: (input: RuleSuggestionActionInput) =>
+    request<{ ok: true }>('/api/rule-suggestions/dismiss', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify(input),
     }),
 
   wipeAll: () =>

@@ -66,6 +66,18 @@ export const SCHEMA_STATEMENTS = [
     createdAt TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_statement_rows_doc ON statement_rows(documentId, idx)`,
+  `CREATE TABLE IF NOT EXISTS category_corrections (
+    id TEXT PRIMARY KEY,
+    merchant TEXT NOT NULL,
+    category TEXT NOT NULL,
+    createdAt TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_category_corrections_merchant
+     ON category_corrections(merchant)`,
+  `CREATE TABLE IF NOT EXISTS rule_suggestion_dismissals (
+    key TEXT PRIMARY KEY,
+    createdAt TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,

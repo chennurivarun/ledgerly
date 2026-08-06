@@ -203,6 +203,37 @@ export interface StatePayload {
   extractions?: ExtractionResult[];
   /** Statement jobs (with rows) for the returned documents. */
   statements?: StatementExtraction[];
+  /** Rule suggestions learned from category corrections (sprint 5). */
+  ruleSuggestions?: RuleSuggestion[];
+}
+
+// ---------------------------------------------------------------------------
+// Correction-learning rule suggestions (sprint 5, vision phase-2 item 1).
+// Deterministic: repeated manual recategorizations of the same merchant become
+// a suggested rule. The rules engine stays authoritative; a suggestion writes
+// nothing until the user accepts it.
+// ---------------------------------------------------------------------------
+
+/** Corrections that must agree before a suggestion is made. */
+export const RULE_SUGGESTION_THRESHOLD = 2;
+
+export interface RuleSuggestion {
+  /** Stable key: `${merchant.toLowerCase().trim()}|${category}`. */
+  id: string;
+  /** Merchant exactly as it appears on the corrected transactions. */
+  merchant: string;
+  /** The category the user keeps choosing for it. */
+  category: string;
+  /** How many corrections agree (>= RULE_SUGGESTION_THRESHOLD). */
+  evidenceCount: number;
+  /** ISO timestamp of the most recent agreeing correction. */
+  lastSeen: string;
+}
+
+/** Body for POST /api/rule-suggestions/accept and /dismiss. */
+export interface RuleSuggestionActionInput {
+  merchant: string;
+  category: string;
 }
 
 // ---------------------------------------------------------------------------
