@@ -71,10 +71,22 @@ or `CLOUDFLARE_API_TOKEN`).
 The free tiers of Workers, D1, and R2 are far more than a personal finance
 app needs.
 
-### AI receipt extraction (optional)
+### AI document reading (optional)
 
-Settings → AI lets Ledgerly suggest transactions from stored receipts. Two
-providers, off by default:
+Settings → AI lets Ledgerly suggest transactions from stored documents. Two
+shapes:
+
+- **Receipt extraction** — one receipt or invoice becomes one suggested
+  transaction with per-field confidence and a review form.
+- **PDF statement extraction** — one bank/card statement becomes a whole
+  batch of proposed rows in a triage table: select, edit, and import the
+  rows you want; duplicates arrive pre-flagged and unchecked; rows the AI
+  couldn't fully read can't be imported until you fill the gap; a statement
+  too long to read completely says so instead of pretending. (Anthropic
+  provider only — Workers AI models can't read PDFs yet. CSV statements
+  still import deterministically and stay the recommended path.)
+
+Two providers, off by default:
 
 - **Workers AI** — processed by Workers AI inside your own Cloudflare
   account, never sent to a third-party vendor. Works automatically on
@@ -107,13 +119,12 @@ secret (`npx wrangler secret put SYNC_TOKEN`) to require a bearer token.
 
 ## Roadmap
 
-Receipt extraction is shipped. Next up: **PDF bank-statement extraction**
-(many transactions from one document — CSV statements already import
-deterministically), then categorization that learns from your corrections,
-cash-flow forecasting, and a read-only MCP server so your own AI client can
-chat with your finances. The full direction is in
-**[docs/VISION.md](docs/VISION.md)**, with the market research behind it in
-[docs/research/](docs/research/).
+Receipt extraction and PDF statement extraction are shipped. Next up:
+**categorization that learns from your corrections** (repeated manual fixes
+become rules you approve), then cash-flow forecasting and a read-only MCP
+server so your own AI client can chat with your finances. The full direction
+is in **[docs/VISION.md](docs/VISION.md)**, with the market research behind
+it in [docs/research/](docs/research/).
 
 ## Contributing
 
