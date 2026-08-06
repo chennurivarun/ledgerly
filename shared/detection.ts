@@ -1,4 +1,4 @@
-import type { Cadence, DetectedPattern, Transaction } from './types';
+import type { Cadence, DetectedPattern, Transaction, TxType } from './types';
 
 /**
  * Merchant normalization for pattern matching (spec §9.1).
@@ -242,9 +242,27 @@ function toIsoDate(d: Date): string {
 }
 
 /**
+ * Advance an ISO calendar date by one cadence period using the engine's own
+ * calendar semantics: monthly/quarterly/annual preserve `anchorDay` (the
+ * pattern's day-of-month, taken from its last real occurrence) with
+ * end-of-month clamping (Jan 31 -> Feb 28, then recovering to Mar 31);
+ * weekly/biweekly are plain 7/14-day steps. Exported so the forecast
+ * (shared/forecast.ts) rolls occurrences forward with EXACTLY the stepping
+ * that produced `nextDate` — one calendar, no second implementation.
+ */
+export function nextCadenceDate(dateIso: string, cadence: Cadence, anchorDay: number): string {
+  return toIsoDate(advanceByCadence(toDateOnly(dateIso), cadence, anchorDay));
+}
+
+/**
  * Recurring/subscription detection engine (spec §9).
  *
- * Operates on expense transactions only, grouped by normalized merchant.
+ * Operates on transactions of ONE type — `opts.type`, defaulting to
+ * 'expense' (the spec-§9 behavior; every pre-forecast call site relies on
+ * that default) — grouped by normalized merchant. Passing
+ * `{ type: 'income' }` runs the identical machinery (cadence windows,
+ * dead-pattern gate, stability cutoffs, confidence) over income instead;
+ * only the grouping filter and the hint gate below differ.
  *
  * `now` is read via its UTC getters (getUTCFullYear/Month/Date) and compared
  * against transaction dates, which are parsed as UTC midnight (see
@@ -263,7 +281,9 @@ function toIsoDate(d: Date): string {
 export function detectPatterns(
   transactions: Transaction[],
   now: Date = new Date(),
+  opts?: { type?: TxType },
 ): DetectedPattern[] {
+  const targetType: TxType = opts?.type ?? 'expense';
   const nowUtcMidnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 
   // Recency reference (used only for the dead-pattern gate below): the
@@ -289,7 +309,7 @@ export function detectPatterns(
 
   const groups = new Map<string, Transaction[]>();
   for (const tx of transactions) {
-    if (tx.type !== 'expense') continue;
+    if (tx.type !== targetType) continue;
     const normalized = normalizeMerchant(tx.merchant);
     if (!normalized) continue;
     const list = groups.get(normalized);
@@ -385,8 +405,18 @@ export function detectPatterns(
     // All tags seen in the group.
     const allTags = txs.flatMap((t) => t.tags);
 
-    const subscriptionHint = hasSubscriptionHint(normalized, category, allTags);
-    const recurringBillHint = hasRecurringBillHint(normalized, category, allTags);
+    // Hints (§9.3/§9.4) are expense-flavored — subscription services and
+    // household bills. For income detection they are disabled entirely, so
+    // e.g. Patreon/GitHub payout income can never be labeled a
+    // 'subscription' (kind stays 'recurring') and a "rent"-named deposit
+    // can't ride the bill-hint relaxation: income must pass the strict
+    // no-hint stability gate on its own. Consequence, pinned in tests:
+    // weekly/biweekly cadences (unlocked only by a subscription hint) are
+    // never detected for income.
+    const subscriptionHint =
+      targetType === 'expense' && hasSubscriptionHint(normalized, category, allTags);
+    const recurringBillHint =
+      targetType === 'expense' && hasRecurringBillHint(normalized, category, allTags);
     const hasHint = subscriptionHint || recurringBillHint;
 
     // False-positive guard (§9.5). Weekly/biweekly cadences are only ever
