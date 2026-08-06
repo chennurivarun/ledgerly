@@ -9,11 +9,14 @@ import {
   type DocumentMeta,
   type ExtractionResult,
   type ExtractionStatus,
+  type StatementExtraction,
+  type StatementJobStatus,
   type UploadResult,
 } from '../../shared/types';
 import { api } from '../api';
 import { ExtractionReviewModal } from '../components/ai/ExtractionReviewModal';
 import { isDocumentExtractable } from '../components/ai/extractionHelpers';
+import { StatementReviewModal } from '../components/ai/StatementReviewModal';
 import { ConfirmDialog } from '../components/manage/ConfirmDialog';
 import { StatusBadge, type BadgeTone } from '../components/manage/StatusBadge';
 import { useDriveSync } from '../components/manage/useDriveSync';
@@ -74,13 +77,55 @@ function extractButtonLabel(extraction: ExtractionResult | undefined): string {
   return 'Re-extract';
 }
 
+// Statement job chip, shown alongside the document's own status badge — a
+// statement is a table, not a receipt: the chip surfaces how many rows are
+// still awaiting triage rather than a single pass/fail state.
+const STATEMENT_TONE: Record<StatementJobStatus, BadgeTone> = {
+  pending: 'info',
+  suggested: 'caution',
+  partial: 'caution',
+  confirmed: 'positive',
+  dismissed: 'neutral',
+  failed: 'danger',
+};
+
+function statementLabel(statement: StatementExtraction): string {
+  const proposed = statement.rows.filter((r) => r.status === 'proposed').length;
+  switch (statement.status) {
+    case 'pending':
+      return 'Reading statement…';
+    case 'suggested':
+      return `${proposed} proposed`;
+    case 'partial':
+      return `${proposed} proposed · truncated`;
+    case 'confirmed':
+      return 'Statement imported';
+    case 'dismissed':
+      return 'Dismissed';
+    case 'failed':
+      return 'Read failed';
+  }
+}
+
+// Same escape-hatch rule as receipt extraction: dismissed/failed/pending all
+// get a plain re-run so no statement job is ever permanently stuck.
+const STATEMENT_REEXTRACTABLE_STATUSES: StatementJobStatus[] = ['dismissed', 'failed', 'pending'];
+
+function statementButtonLabel(statement: StatementExtraction | undefined): string {
+  if (!statement) return 'Read as statement';
+  if (statement.status === 'pending') return 'Try again';
+  return 'Re-run';
+}
+
 export default function Documents() {
   const documents = useStore((s) => s.documents);
   const extractions = useStore((s) => s.extractions);
+  const statements = useStore((s) => s.statements);
   const aiProvider = useStore((s) => s.settings.aiProvider);
   const aiKeySet = useStore((s) => s.settings.aiKeySet);
   const uploadDocuments = useStore((s) => s.uploadDocuments);
   const extractDocument = useStore((s) => s.extractDocument);
+  const extractStatement = useStore((s) => s.extractStatement);
   const refreshQuiet = useStore((s) => s.refreshQuiet);
   const toast = useStore((s) => s.toast);
   const drive = useDriveSync();
@@ -92,16 +137,25 @@ export default function Documents() {
   const [pendingDelete, setPendingDelete] = useState<DocumentMeta | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  // Busy-flag discipline: only one document can extract at a time — every
-  // other row's Extract button is disabled while it runs (same rule
-  // ManagedListSection applies to its add/remove controls).
-  const [extractingId, setExtractingId] = useState<string | null>(null);
+  // Busy-flag discipline: only one AI run (receipt extract OR statement
+  // read) across the whole vault at a time — every other row's actions are
+  // disabled while it runs (same rule ManagedListSection applies to its
+  // add/remove controls). Tracking `kind` alongside the id lets a single
+  // document's Extract and "Read as statement" buttons show independent
+  // loading state without allowing either to start while the other runs.
+  const [running, setRunning] = useState<{ id: string; kind: 'extract' | 'statement' } | null>(null);
   // Transient, per-document: a thrown request-level error (network/HTTP).
-  // Server-recorded failures use extraction.error instead — kept to exactly
-  // one persistent surface (the chip's row text) and one transient surface
-  // (this), no redundant toast on top of either.
+  // Server-recorded failures use extraction.error/statement.error instead —
+  // kept to exactly one persistent surface (the chip's row text) and one
+  // transient surface (this), no redundant toast on top of either.
   const [extractError, setExtractError] = useState<{ id: string; message: string } | null>(null);
-  const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [statementError, setStatementError] = useState<{ id: string; message: string } | null>(null);
+  // Single slot for whichever review modal is open (extraction or
+  // statement) — one `kind` field means an auto-open from either flow can
+  // check "is anything at all already open" with one freshness-guaranteed
+  // updater, instead of two state variables that can't see each other's
+  // latest value from inside a setState callback.
+  const [reviewing, setReviewing] = useState<{ id: string; kind: 'extract' | 'statement' } | null>(null);
 
   const aiOn = aiProvider !== 'off';
   // Anthropic without a stored key can't actually extract anything — treat
@@ -110,7 +164,7 @@ export default function Documents() {
   const aiReady = aiOn && !keyMissing;
 
   async function handleExtract(doc: DocumentMeta) {
-    setExtractingId(doc.id);
+    setRunning({ id: doc.id, kind: 'extract' });
     setExtractError(null);
     try {
       const result = await extractDocument(doc.id);
@@ -118,7 +172,7 @@ export default function Documents() {
         // Never steal focus from an already-open review: if the user is
         // mid-edit on a different document, this result waits for its own
         // Review click instead of hijacking the open modal.
-        setReviewingId((current) => (current === null ? doc.id : current));
+        setReviewing((current) => (current === null ? { id: doc.id, kind: 'extract' } : current));
       } else if (result.status === 'pending') {
         toast('success', 'Still working — check back in a moment.');
       }
@@ -128,21 +182,43 @@ export default function Documents() {
       const message = e instanceof Error ? e.message : 'Could not extract that document.';
       setExtractError({ id: doc.id, message });
     } finally {
-      setExtractingId(null);
+      setRunning(null);
+    }
+  }
+
+  async function handleReadStatement(doc: DocumentMeta) {
+    setRunning({ id: doc.id, kind: 'statement' });
+    setStatementError(null);
+    try {
+      const result = await extractStatement(doc.id);
+      if (result.status === 'suggested' || result.status === 'partial') {
+        setReviewing((current) => (current === null ? { id: doc.id, kind: 'statement' } : current));
+      } else if (result.status === 'pending') {
+        toast('success', 'Still working — check back in a moment.');
+      }
+      // 'failed' is surfaced persistently via the statement row's own error
+      // text once the store updates — no toast needed on top of that.
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Could not read that statement.';
+      setStatementError({ id: doc.id, message });
+    } finally {
+      setRunning(null);
     }
   }
 
   // While anything is 'pending', poll for a resolved status instead of
-  // leaving the row stuck on "Extracting…" forever — but never while a
-  // review modal is open. A poll-triggered re-render hands the modal a new
-  // set of store-derived props on every tick; without pausing, that used to
-  // change the modal's onClose identity too, which re-ran the (frozen)
-  // Modal's focus effect and yanked focus to its close button mid-edit — a
-  // stray Enter would then discard the draft. Paused here, and belt-and-
-  // braces via the stable closeReview/guarded-onClose below.
-  const hasPending = extractions.some((e) => e.status === 'pending');
+  // leaving the row stuck on "Extracting…"/"Reading statement…" forever —
+  // but never while a review modal is open. A poll-triggered re-render hands
+  // the modal a new set of store-derived props on every tick; without
+  // pausing, that used to change the modal's onClose identity too, which
+  // re-ran the (frozen) Modal's focus effect and yanked focus to its close
+  // button mid-edit — a stray Enter would then discard the draft. Paused
+  // here, and belt-and-braces via the stable closeReview/guarded-onClose in
+  // each modal.
+  const hasPending =
+    extractions.some((e) => e.status === 'pending') || statements.some((s) => s.status === 'pending');
   useEffect(() => {
-    if (!hasPending || reviewingId) return;
+    if (!hasPending || reviewing) return;
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout>;
     // Re-arm only after the previous refresh settles, so a slow request
@@ -157,13 +233,13 @@ export default function Documents() {
       cancelled = true;
       clearTimeout(timeoutId);
     };
-  }, [hasPending, reviewingId, refreshQuiet]);
+  }, [hasPending, reviewing, refreshQuiet]);
 
-  // Stable identity across re-renders (setReviewingId from useState never
-  // changes) — passed to the modal so its internal onClose guard can also
-  // stay stable, which is what actually stops the focus effect from re-
-  // running on every poll tick or busy transition.
-  const closeReview = useCallback(() => setReviewingId(null), []);
+  // Stable identity across re-renders (setReviewing from useState never
+  // changes) — passed to whichever modal is open so its internal onClose
+  // guard can also stay stable, which is what actually stops the focus
+  // effect from re-running on every poll tick or busy transition.
+  const closeReview = useCallback(() => setReviewing(null), []);
 
   async function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
@@ -351,7 +427,9 @@ export default function Documents() {
           <ul className="divide-y divide-border">
             {documents.map((doc) => {
               const extraction = extractions.find((e) => e.documentId === doc.id);
+              const statement = statements.find((s) => s.documentId === doc.id);
               const mimeOk = isDocumentExtractable(doc.mimeType);
+              const isPdf = doc.mimeType === 'application/pdf';
               // Review just opens an already-fetched suggestion — it never
               // calls the provider, so it stays reachable even with AI fully
               // off (otherwise a 'suggested' extraction from before the user
@@ -360,6 +438,23 @@ export default function Documents() {
               // Starting a NEW extraction needs a ready provider (a key, if anthropic).
               const showExtract =
                 aiReady && mimeOk && (!extraction || REEXTRACTABLE_STATUSES.includes(extraction.status));
+
+              // Statement path: PDF only (spec — the receipt path above stays
+              // for one-purchase PDFs; images get receipt only). Same
+              // already-fetched-suggestion reasoning as showReview.
+              const proposedCount = statement ? statement.rows.filter((r) => r.status === 'proposed').length : 0;
+              const showStatementReview =
+                isPdf &&
+                !!statement &&
+                (statement.status === 'suggested' || statement.status === 'partial') &&
+                proposedCount > 0;
+              // Ready like Extract, plus PDF-only — but the backend rejects
+              // Workers AI for PDFs, so a workers-ai user still sees the
+              // button (not hidden) with a disabled state and an honest
+              // reason, rather than a click that just fails server-side.
+              const showStatementAction =
+                aiReady && isPdf && (!statement || STATEMENT_REEXTRACTABLE_STATUSES.includes(statement.status));
+              const statementBlockedByProvider = showStatementAction && aiProvider === 'workers-ai';
               return (
                 <li key={doc.id} className="flex flex-wrap items-center gap-3 py-3">
                   <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
@@ -377,9 +472,18 @@ export default function Documents() {
                       </p>
                     )}
                     {extractError?.id === doc.id && <p className="mt-0.5 text-xs text-danger">{extractError.message}</p>}
+                    {statement?.status === 'failed' && (
+                      <p className="mt-0.5 text-xs text-danger">
+                        {statement.error ?? 'Could not read this statement — try again.'}
+                      </p>
+                    )}
+                    {statementError?.id === doc.id && (
+                      <p className="mt-0.5 text-xs text-danger">{statementError.message}</p>
+                    )}
                   </div>
                   <StatusBadge label={STATUS_LABEL[doc.status]} tone={STATUS_TONE[doc.status]} />
                   {extraction && <StatusBadge label={EXTRACTION_LABEL[extraction.status]} tone={EXTRACTION_TONE[extraction.status]} />}
+                  {statement && <StatusBadge label={statementLabel(statement)} tone={STATEMENT_TONE[statement.status]} />}
                   {showReview && (
                     // Disabled parity with Extract: opening a review while
                     // another document's extraction is in flight is exactly
@@ -388,22 +492,48 @@ export default function Documents() {
                     <Button
                       variant="subtle"
                       size="sm"
-                      disabled={extractingId !== null}
-                      onClick={() => setReviewingId(doc.id)}
+                      disabled={running !== null}
+                      onClick={() => setReviewing({ id: doc.id, kind: 'extract' })}
                     >
                       Review
+                    </Button>
+                  )}
+                  {showStatementReview && (
+                    <Button
+                      variant="subtle"
+                      size="sm"
+                      disabled={running !== null}
+                      onClick={() => setReviewing({ id: doc.id, kind: 'statement' })}
+                    >
+                      Review {proposedCount} transaction{proposedCount === 1 ? '' : 's'}
                     </Button>
                   )}
                   {showExtract && (
                     <Button
                       variant="ghost"
                       size="sm"
-                      loading={extractingId === doc.id}
-                      disabled={extractingId !== null && extractingId !== doc.id}
+                      loading={running?.id === doc.id && running.kind === 'extract'}
+                      disabled={running !== null && !(running.id === doc.id && running.kind === 'extract')}
                       onClick={() => void handleExtract(doc)}
                     >
                       <Sparkles className="size-3.5" aria-hidden />
                       {extractButtonLabel(extraction)}
+                    </Button>
+                  )}
+                  {showStatementAction && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      loading={running?.id === doc.id && running.kind === 'statement'}
+                      disabled={
+                        statementBlockedByProvider ||
+                        (running !== null && !(running.id === doc.id && running.kind === 'statement'))
+                      }
+                      title={statementBlockedByProvider ? 'PDF statements need the Anthropic provider' : undefined}
+                      onClick={() => void handleReadStatement(doc)}
+                    >
+                      <Sparkles className="size-3.5" aria-hidden />
+                      {statementButtonLabel(statement)}
                     </Button>
                   )}
                   <a
@@ -448,21 +578,38 @@ export default function Documents() {
         />
       )}
 
-      {reviewingId &&
+      {reviewing?.kind === 'extract' &&
         (() => {
-          const reviewDoc = documents.find((d) => d.id === reviewingId);
-          const reviewExtraction = extractions.find((e) => e.documentId === reviewingId);
+          const reviewDoc = documents.find((d) => d.id === reviewing.id);
+          const reviewExtraction = extractions.find((e) => e.documentId === reviewing.id);
           if (!reviewDoc || !reviewExtraction) return null;
           return (
-            // key={reviewingId} forces a full remount (and re-seed) whenever
+            // key={reviewing.id} forces a full remount (and re-seed) whenever
             // the reviewed document changes — belt-and-braces on top of the
             // "only open if nothing is open" guard in handleExtract, so a
             // stale draft can never render against a different document's
             // image/attribution.
             <ExtractionReviewModal
-              key={reviewingId}
+              key={reviewing.id}
               doc={reviewDoc}
               extraction={reviewExtraction}
+              onClose={closeReview}
+            />
+          );
+        })()}
+
+      {reviewing?.kind === 'statement' &&
+        (() => {
+          const reviewDoc = documents.find((d) => d.id === reviewing.id);
+          const reviewStatement = statements.find((s) => s.documentId === reviewing.id);
+          if (!reviewDoc || !reviewStatement) return null;
+          return (
+            // Same keyed-remount + guarded-close discipline as the
+            // extraction modal above (sprint-3 lesson).
+            <StatementReviewModal
+              key={reviewing.id}
+              doc={reviewDoc}
+              statement={reviewStatement}
               onClose={closeReview}
             />
           );
