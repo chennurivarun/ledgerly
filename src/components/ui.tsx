@@ -281,12 +281,17 @@ export function Modal({
   children,
   footer,
   wide = false,
+  xl = false,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
   wide?: boolean;
+  /** Wider still than `wide` — for content that genuinely needs desktop
+   * width (e.g. a dense review table). Backward compatible: existing `wide`
+   * callers are unaffected since this only takes effect when explicitly set. */
+  xl?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useRef(`modal-title-${++modalTitleSeq}`);
@@ -342,7 +347,7 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={titleId.current}
         className={`flex max-h-[92dvh] w-full flex-col rounded-t-2xl bg-surface shadow-xl sm:rounded-card ${
-          wide ? 'sm:max-w-2xl' : 'sm:max-w-lg'
+          xl ? 'sm:max-w-[min(96vw,1100px)]' : wide ? 'sm:max-w-2xl' : 'sm:max-w-lg'
         }`}
       >
         <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">

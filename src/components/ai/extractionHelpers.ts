@@ -94,7 +94,10 @@ export function validateExtractionDraft(draft: ExtractionDraft): string | null {
   if (!draft.merchant.trim()) return 'Enter a merchant.';
   if (!draft.date || !isRealDateISO(draft.date)) return 'Choose a real date.';
   const total = Number(draft.total);
-  if (!Number.isFinite(total) || total <= 0) return 'Enter a total greater than 0.';
+  // Guard against sub-cent amounts (e.g. "0.004"): they pass a naive `> 0`
+  // check but round to 0 once stored as cents (buildTxInputFromDraft below
+  // rounds the same way) — validate the rounding the payload actually uses.
+  if (!Number.isFinite(total) || Math.round(total * 100) < 1) return 'Enter a total greater than 0.';
   if (!draft.category) return 'Choose a category.';
   if (!draft.account) return 'Choose an account.';
   return null;

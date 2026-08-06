@@ -241,6 +241,22 @@ export default function Documents() {
   // effect from re-running on every poll tick or busy transition.
   const closeReview = useCallback(() => setReviewing(null), []);
 
+  // Defensive cleanup: if the document (or its extraction/statement record)
+  // a review modal points at disappears from the store — deleted, or wiped
+  // by a background refresh — clear `reviewing` rather than leaving it
+  // pointing at nothing. The modal already renders null in that case (see
+  // the lookups below), but `reviewing` staying set would keep the polling
+  // effect above paused forever with no visible modal to show for it.
+  useEffect(() => {
+    if (!reviewing) return;
+    const docStillExists = documents.some((d) => d.id === reviewing.id);
+    const targetStillExists =
+      reviewing.kind === 'extract'
+        ? extractions.some((e) => e.documentId === reviewing.id)
+        : statements.some((s) => s.documentId === reviewing.id);
+    if (!docStillExists || !targetStillExists) setReviewing(null);
+  }, [reviewing, documents, extractions, statements]);
+
   async function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
     const files = Array.from(fileList);
@@ -452,8 +468,17 @@ export default function Documents() {
               // Workers AI for PDFs, so a workers-ai user still sees the
               // button (not hidden) with a disabled state and an honest
               // reason, rather than a click that just fails server-side.
+              // Also covers the dead-end where a job landed in
+              // 'suggested'/'partial' with zero proposed rows — a real
+              // outcome (a PDF with no readable table, rows pruned, or
+              // /api/state's newest-10-jobs cap meaning rows:[] even though
+              // rowCount > 0) that otherwise leaves no action at all.
               const showStatementAction =
-                aiReady && isPdf && (!statement || STATEMENT_REEXTRACTABLE_STATUSES.includes(statement.status));
+                aiReady &&
+                isPdf &&
+                (!statement ||
+                  STATEMENT_REEXTRACTABLE_STATUSES.includes(statement.status) ||
+                  ((statement.status === 'suggested' || statement.status === 'partial') && proposedCount === 0));
               const statementBlockedByProvider = showStatementAction && aiProvider === 'workers-ai';
               return (
                 <li key={doc.id} className="flex flex-wrap items-center gap-3 py-3">
@@ -521,20 +546,27 @@ export default function Documents() {
                     </Button>
                   )}
                   {showStatementAction && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      loading={running?.id === doc.id && running.kind === 'statement'}
-                      disabled={
-                        statementBlockedByProvider ||
-                        (running !== null && !(running.id === doc.id && running.kind === 'statement'))
-                      }
-                      title={statementBlockedByProvider ? 'PDF statements need the Anthropic provider' : undefined}
-                      onClick={() => void handleReadStatement(doc)}
-                    >
-                      <Sparkles className="size-3.5" aria-hidden />
-                      {statementButtonLabel(statement)}
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        loading={running?.id === doc.id && running.kind === 'statement'}
+                        disabled={
+                          statementBlockedByProvider ||
+                          (running !== null && !(running.id === doc.id && running.kind === 'statement'))
+                        }
+                        title={statementBlockedByProvider ? 'PDF statements need the Anthropic provider' : undefined}
+                        onClick={() => void handleReadStatement(doc)}
+                      >
+                        <Sparkles className="size-3.5" aria-hidden />
+                        {statementButtonLabel(statement)}
+                      </Button>
+                      {/* Visible, not title-only: a title attribute is
+                          unreachable on a disabled, non-focusable control. */}
+                      {statementBlockedByProvider && (
+                        <span className="text-xs text-muted">PDF statements need the Anthropic provider.</span>
+                      )}
+                    </div>
                   )}
                   <a
                     href={api.documentDownloadUrl(doc.id)}

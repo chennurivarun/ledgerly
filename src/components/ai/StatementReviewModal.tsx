@@ -16,12 +16,16 @@ import type {
 } from '../../../shared/types';
 import { useStore } from '../../store';
 import { Button, InlineError, Input, Modal, Select } from '../ui';
+import { ConfirmDialog } from '../manage/ConfirmDialog';
 import {
+  applyDraftPatch,
   buildStatementConfirmInput,
   canRowBeSelected,
+  isCleanOutcome,
   missingRowFields,
-  rowLowConfidenceFields,
   seedStatementRowDraft,
+  selectableRows,
+  visibleLowConfidenceFields,
   type StatementRowDraft,
 } from './statementHelpers';
 
@@ -67,6 +71,8 @@ export function StatementReviewModal({
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<BatchInsertResult | null>(null);
   const [busy, setBusy] = useState<'confirm' | 'dismiss' | null>(null);
+  const [onlyFlagged, setOnlyFlagged] = useState(false);
+  const [confirmingDismissAll, setConfirmingDismissAll] = useState(false);
 
   // Server truth, not a guess: after a confirm, store.confirmStatementRows
   // refreshes `statements` from the server, and rows that actually got
@@ -95,11 +101,16 @@ export function StatementReviewModal({
   // Same identity-stability requirement as ExtractionReviewModal's
   // guardedClose: the frozen Modal re-runs its focus-trap effect whenever the
   // `onClose` it receives changes identity, so this must stay referentially
-  // stable across re-renders (busy read through a ref, not a closure).
+  // stable across re-renders (busy/confirmingDismissAll read through refs,
+  // not closures). Also blocked while the nested "Dismiss all?" ConfirmDialog
+  // is open, so an Escape aimed at that dialog can't fall through and close
+  // this modal underneath it too.
   const busyRef = useRef(busy);
   busyRef.current = busy;
+  const confirmingDismissAllRef = useRef(confirmingDismissAll);
+  confirmingDismissAllRef.current = confirmingDismissAll;
   const guardedClose = useCallback(() => {
-    if (!busyRef.current) onClose();
+    if (!busyRef.current && !confirmingDismissAllRef.current) onClose();
   }, [onClose]);
 
   // Stable across renders (functional setState — doesn't close over `drafts`)
@@ -109,7 +120,7 @@ export function StatementReviewModal({
     setDrafts((prev) => {
       const current = prev[id];
       if (!current) return prev;
-      return { ...prev, [id]: { ...current, ...patch } };
+      return { ...prev, [id]: applyDraftPatch(current, patch) };
     });
     // Resuming edits after a partial outcome signals "let me try again" —
     // mirrors ExtractionReviewModal's duplicateNotice-clears-on-edit pattern.
@@ -129,9 +140,24 @@ export function StatementReviewModal({
     setOutcome(null);
   }
 
-  const selectedRows = useMemo(
-    () => pendingRows.filter((r) => drafts[r.id]?.selected && canRowBeSelected(drafts[r.id])),
-    [pendingRows, drafts],
+  const selectedRows = useMemo(() => selectableRows(pendingRows, drafts), [pendingRows, drafts]);
+
+  // Rows still worth a second look: the AI's original suggestion was
+  // low-confidence for at least one field the user hasn't since edited away.
+  // Printed statement order stays the primary sort (it's the cross-check
+  // against the source PDF) — this is a filter, not a reorder.
+  const flaggedRowIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const row of pendingRows) {
+      const d = drafts[row.id];
+      if (d && visibleLowConfidenceFields(row, d, settings.categories).length > 0) ids.add(row.id);
+    }
+    return ids;
+  }, [pendingRows, drafts, settings.categories]);
+
+  const visibleRows = useMemo(
+    () => (onlyFlagged ? pendingRows.filter((r) => flaggedRowIds.has(r.id)) : pendingRows),
+    [pendingRows, flaggedRowIds, onlyFlagged],
   );
 
   const noAccounts = settings.accounts.length === 0;
@@ -147,15 +173,24 @@ export function StatementReviewModal({
     try {
       const input = buildStatementConfirmInput(selectedRows, drafts, account);
       const res = await confirmStatementRows(doc.id, input);
-      const clean = res.errors.length === 0 && res.duplicates === 0 && res.inserted === selectedRows.length;
-      if (clean) {
+      if (isCleanOutcome(res, selectedRows.length)) {
         toast('success', `Imported ${res.inserted} transaction${res.inserted === 1 ? '' : 's'}.`);
         onClose();
         return;
       }
-      // Honest, not silently swallowed: report exactly what happened and
-      // keep the modal open — the rows that succeeded fall out of
+      // Honest, not silently swallowed: report exactly what happened. Uncheck
+      // exactly the rows just attempted so a second click can't resubmit
+      // them before the store's unawaited refresh lands (or if it never
+      // does) — the rows that actually succeeded also fall out of
       // `pendingRows` once the effect above re-syncs from the server.
+      const attemptedIds = new Set(input.rows.map((r) => r.rowId));
+      setDrafts((prev) => {
+        const next = { ...prev };
+        for (const id of attemptedIds) {
+          if (next[id]) next[id] = { ...next[id], selected: false };
+        }
+        return next;
+      });
       setOutcome(res);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not import the selected rows.');
@@ -173,6 +208,7 @@ export function StatementReviewModal({
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not dismiss this statement.');
       setBusy(null);
+      setConfirmingDismissAll(false);
     }
   }
 
@@ -180,12 +216,12 @@ export function StatementReviewModal({
     <Modal
       title="Review statement"
       onClose={guardedClose}
-      wide
+      xl
       footer={
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Button
             variant="ghost"
-            onClick={() => void handleDismissAll()}
+            onClick={() => (pendingRows.length > 1 ? setConfirmingDismissAll(true) : void handleDismissAll())}
             disabled={busy !== null}
             loading={busy === 'dismiss'}
           >
@@ -271,6 +307,14 @@ export function StatementReviewModal({
                 <Button variant="ghost" size="sm" onClick={() => applySelection(() => false)} disabled={busy !== null}>
                   Select none
                 </Button>
+                <Button
+                  variant={onlyFlagged ? 'subtle' : 'ghost'}
+                  size="sm"
+                  onClick={() => setOnlyFlagged((v) => !v)}
+                  disabled={busy !== null}
+                >
+                  Needs verification ({flaggedRowIds.size})
+                </Button>
               </div>
               <label className="flex items-center gap-2 text-xs font-medium text-muted">
                 Account for this batch
@@ -295,51 +339,68 @@ export function StatementReviewModal({
               </label>
             </div>
 
-            <div className="scroll-rail max-h-[50vh] overflow-auto rounded-xl border border-border">
-              <table className="w-full min-w-[960px] border-collapse text-sm">
-                <thead className="sticky top-0 z-10 bg-canvas">
-                  <tr className="border-b border-border text-left text-xs font-medium text-muted">
-                    <th scope="col" className="w-11 px-2 py-2">
-                      <span className="sr-only">Select</span>
-                    </th>
-                    <th scope="col" className="px-2 py-2">
-                      Date
-                    </th>
-                    <th scope="col" className="px-2 py-2">
-                      Merchant
-                    </th>
-                    <th scope="col" className="px-2 py-2">
-                      Type
-                    </th>
-                    <th scope="col" className="px-2 py-2 text-right">
-                      Amount
-                    </th>
-                    <th scope="col" className="px-2 py-2">
-                      Category
-                    </th>
-                    <th scope="col" className="px-2 py-2">
-                      <span className="sr-only">Flags</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pendingRows.map((row) => (
-                    <StatementRowItem
-                      key={row.id}
-                      row={row}
-                      draft={drafts[row.id]}
-                      categories={settings.categories}
-                      noCategories={noCategories}
-                      busy={busy !== null}
-                      onChange={updateDraft}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {visibleRows.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted">No rows need verification right now.</p>
+            ) : (
+              <div className="scroll-rail max-h-[50vh] overflow-auto rounded-xl border border-border">
+                <table className="w-full min-w-[900px] border-collapse text-sm">
+                  <thead className="sticky top-0 z-10 bg-canvas">
+                    <tr className="border-b border-border text-left text-xs font-medium text-muted">
+                      <th scope="col" className="w-11 px-2 py-2">
+                        <span className="sr-only">Select</span>
+                      </th>
+                      <th scope="col" className="px-2 py-2">
+                        Date
+                      </th>
+                      <th scope="col" className="px-2 py-2">
+                        Merchant
+                      </th>
+                      <th scope="col" className="px-2 py-2">
+                        Type
+                      </th>
+                      <th scope="col" className="px-2 py-2 text-right">
+                        Amount
+                      </th>
+                      <th scope="col" className="px-2 py-2">
+                        Category
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleRows.map((row) => (
+                      <StatementRowItem
+                        key={row.id}
+                        row={row}
+                        draft={drafts[row.id]}
+                        categories={settings.categories}
+                        noCategories={noCategories}
+                        busy={busy !== null}
+                        onChange={updateDraft}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </>
         )}
       </div>
+
+      {confirmingDismissAll && (
+        <ConfirmDialog
+          title="Dismiss this statement?"
+          message={
+            <p>
+              This dismisses all {pendingRows.length} remaining row{pendingRows.length === 1 ? '' : 's'} from this
+              statement — none of them will be imported. This can&apos;t be undone.
+            </p>
+          }
+          confirmLabel="Dismiss all"
+          busy={busy === 'dismiss'}
+          onConfirm={() => void handleDismissAll()}
+          onCancel={() => setConfirmingDismissAll(false)}
+        />
+      )}
     </Modal>
   );
 }
@@ -362,11 +423,14 @@ const StatementRowItem = memo(function StatementRowItem({
   if (!draft) return null;
 
   const missing = missingRowFields(draft);
-  const lowConfidenceFields = rowLowConfidenceFields(row);
+  const flags = visibleLowConfidenceFields(row, draft, categories);
   const selectable = missing.length === 0;
   const amountNum = Number(draft.amount);
-  const amountPreview =
-    draft.amount.trim() !== '' && Number.isFinite(amountNum) ? fmtSigned(amountNum, draft.type) : null;
+  const amountValid = !missing.includes('amount');
+  let amountPreview: string | null = null;
+  if (amountValid && draft.type) {
+    amountPreview = fmtSigned(amountNum, draft.type);
+  }
   const rowLabel = `row ${row.index + 1}`;
 
   return (
@@ -396,7 +460,11 @@ const StatementRowItem = memo(function StatementRowItem({
             onChange={(e) => onChange(row.id, { date: e.target.value })}
           />
         </div>
-        {missing.includes('date') && <p className="mt-1 text-[11px] font-medium text-danger">Missing date</p>}
+        {missing.includes('date') ? (
+          <p className="mt-1 text-[11px] font-medium text-danger">Missing date</p>
+        ) : (
+          flags.includes('date') && <FieldFlag />
+        )}
       </td>
       <td className="px-2 py-2 align-top">
         <div className="w-48">
@@ -408,19 +476,24 @@ const StatementRowItem = memo(function StatementRowItem({
             placeholder="Merchant"
           />
         </div>
-        {missing.includes('merchant') && (
+        {missing.includes('merchant') ? (
           <p className="mt-1 text-[11px] font-medium text-danger">Missing merchant</p>
+        ) : (
+          flags.includes('merchant') && <FieldFlag />
         )}
         {row.duplicate && <p className="mt-1 text-[11px] font-medium text-muted">Already in your ledger</p>}
       </td>
       <td className="px-2 py-2 align-top">
-        <div className="w-28">
+        <div className="w-32">
           <Select
             aria-label={`Type for ${rowLabel}`}
             value={draft.type}
             disabled={busy}
             onChange={(e) => onChange(row.id, { type: e.target.value as TxType })}
           >
+            <option value="" disabled>
+              Choose…
+            </option>
             {TYPE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
@@ -428,9 +501,14 @@ const StatementRowItem = memo(function StatementRowItem({
             ))}
           </Select>
         </div>
+        {missing.includes('type') ? (
+          <p className="mt-1 text-[11px] font-medium text-danger">Missing type</p>
+        ) : (
+          flags.includes('type') && <FieldFlag />
+        )}
       </td>
       <td className="px-2 py-2 align-top text-right">
-        <div className="w-28 ml-auto">
+        <div className="ml-auto w-28">
           <Input
             type="number"
             inputMode="decimal"
@@ -443,15 +521,19 @@ const StatementRowItem = memo(function StatementRowItem({
             placeholder="0.00"
           />
         </div>
-        {amountPreview && (
-          <p
-            className={`mt-1 text-xs font-medium tabular-nums ${draft.type === 'income' ? 'text-positive' : 'text-ink'}`}
-          >
-            {amountPreview}
-          </p>
-        )}
-        {missing.includes('amount') && (
+        {missing.includes('amount') ? (
           <p className="mt-1 text-[11px] font-medium text-danger">Missing amount</p>
+        ) : (
+          <>
+            {amountPreview && (
+              <p
+                className={`mt-1 text-xs font-medium tabular-nums ${draft.type === 'income' ? 'text-positive' : 'text-ink'}`}
+              >
+                {amountPreview}
+              </p>
+            )}
+            {flags.includes('amount') && <FieldFlag align="right" />}
+          </>
         )}
       </td>
       <td className="px-2 py-2 align-top">
@@ -474,18 +556,20 @@ const StatementRowItem = memo(function StatementRowItem({
             </Select>
           </div>
         )}
-      </td>
-      <td className="px-2 py-2 align-top">
-        {lowConfidenceFields.length > 0 && (
-          <span
-            className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-caution"
-            title={`Low confidence: ${lowConfidenceFields.join(', ')}`}
-          >
-            <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
-            Verify
-          </span>
-        )}
+        {flags.includes('category') && <FieldFlag />}
       </td>
     </tr>
   );
 });
+
+/** Visible (not title-only) low-confidence marker for a single table cell. */
+function FieldFlag({ align = 'left' }: { align?: 'left' | 'right' }) {
+  return (
+    <p
+      className={`mt-1 flex items-center gap-1 text-[11px] font-medium text-caution ${align === 'right' ? 'justify-end' : ''}`}
+    >
+      <AlertTriangle className="size-3 shrink-0" aria-hidden />
+      Low confidence
+    </p>
+  );
+}
