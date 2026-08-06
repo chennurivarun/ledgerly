@@ -108,7 +108,9 @@ comfortable letting AI make financial decisions autonomously).
    and a hard row cap per run.
 4. **Cash-flow forecasting** on top of the recurring-detection engine — the
    numeric projection stays deterministic and auditable; AI narrates
-   scenarios in plain language.
+   scenarios in plain language. ✅ *Deterministic projection shipped August
+   2026 (30/60/90-day horizons on the Recurring page, income + expense
+   series); AI narration still to come.*
 5. **Natural-language search / MCP.** Read-only. Expose the user's data as
    an MCP server so they can point *their own* AI client at *their own*
    finances — "chat with your money" without the data ever leaving their
