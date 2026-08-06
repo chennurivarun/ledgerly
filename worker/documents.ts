@@ -142,8 +142,14 @@ export async function uploadDocuments(env: Env, form: FormData): Promise<UploadR
   return { documents, inserted, duplicates, review, errors };
 }
 
-/** Streams the original bytes back — the R2 key never leaves the server. */
-export async function downloadDocument(env: Env, id: string): Promise<Response> {
+/**
+ * Streams the original bytes back — the R2 key never leaves the server.
+ * `inline` renders the file in the browser (e.g. the extraction review
+ * modal's PDF preview) instead of triggering a download; everything else
+ * about the response is unchanged. Default stays `attachment` so a plain
+ * link/tab-open still downloads as before.
+ */
+export async function downloadDocument(env: Env, id: string, opts: { inline?: boolean } = {}): Promise<Response> {
   const row = await env.DB.prepare(
     'SELECT filename, mimeType, objectKey FROM documents WHERE id = ?',
   )
@@ -155,12 +161,13 @@ export async function downloadDocument(env: Env, id: string): Promise<Response> 
   if (!object) throw new ApiFail(404, 'The stored copy of that file is no longer available.');
 
   const ascii = safeFilename(row.filename);
+  const disposition = opts.inline ? 'inline' : 'attachment';
   const headers = new Headers();
   headers.set('Content-Type', row.mimeType || 'application/octet-stream');
   headers.set('Content-Length', String(object.size));
   headers.set(
     'Content-Disposition',
-    `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
+    `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
   );
   headers.set('Cache-Control', 'private, no-store');
   return new Response(object.body, { headers });

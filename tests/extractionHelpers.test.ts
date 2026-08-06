@@ -52,6 +52,14 @@ describe('isLowConfidence', () => {
     expect(isLowConfidence(field('x', 0.6))).toBe(false);
     expect(isLowConfidence(field('x', 1))).toBe(false);
   });
+
+  it('treats non-finite or missing confidence as LOW, never as implicitly high', () => {
+    expect(isLowConfidence(field('x', NaN))).toBe(true);
+    expect(isLowConfidence(field('x', Infinity))).toBe(true);
+    expect(isLowConfidence(field('x', -Infinity))).toBe(true);
+    // Malformed data crossing the JSON boundary — confidence missing entirely.
+    expect(isLowConfidence({ value: 'x' } as unknown as ExtractedField<string>)).toBe(true);
+  });
 });
 
 describe('isDocumentExtractable', () => {
@@ -95,8 +103,12 @@ describe('resolveCategorySuggestion', () => {
     expect(resolveCategorySuggestion(null, categories)).toBe('Needs review');
   });
 
-  it('falls back to the first category when Needs review is not in the list', () => {
-    expect(resolveCategorySuggestion(null, ['Housing', 'Dining'])).toBe('Housing');
+  it('never silently substitutes an unrelated category — seeds empty when Needs review is absent', () => {
+    // Regression: a confident "Travel" suggestion must never quietly become
+    // "Housing" (categories[0]) under a "Suggested by AI" footer — that's an
+    // invented value, not a real fallback.
+    expect(resolveCategorySuggestion('Travel', ['Housing', 'Dining'])).toBe('');
+    expect(resolveCategorySuggestion(null, ['Housing', 'Dining'])).toBe('');
   });
 
   it('returns an empty string when there are no categories at all', () => {
@@ -133,6 +145,18 @@ describe('seedExtractionDraft', () => {
     const draft = seedExtractionDraft(extraction({ type: field<TxType>(null, 0.9) }), settings);
     expect(draft.type).toBe('expense');
     expect(draft.account).toBe('Main Checking');
+  });
+
+  it('never invents a category: an unmatched suggestion seeds "Needs review" when present, not a silent substitution', () => {
+    const draft = seedExtractionDraft(extraction({ category: field('Travel', 0.95) }), settings);
+    // settings.categories includes 'Needs review' here, so that's the honest fallback.
+    expect(draft.category).toBe('Needs review');
+  });
+
+  it('never invents a category: an unmatched suggestion seeds empty when Needs review is unavailable, forcing an explicit choice', () => {
+    const noReview = { categories: ['Housing', 'Dining'], accounts: ['Main Checking'] };
+    const draft = seedExtractionDraft(extraction({ category: field('Travel', 0.95) }), noReview);
+    expect(draft.category).toBe('');
   });
 });
 

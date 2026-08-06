@@ -326,9 +326,18 @@ const AI_PROVIDER_OPTIONS: { value: AiProvider; label: string }[] = [
 
 const AI_PROVIDER_COPY: Record<AiProvider, string> = {
   off: 'AI receipt extraction is disabled — no document is ever sent anywhere for analysis.',
-  'workers-ai': 'Runs inside your own Cloudflare account — document bytes never leave your infrastructure.',
+  'workers-ai':
+    'Processed by Workers AI inside your own Cloudflare account — never sent to a third-party vendor.',
   anthropic:
     "Sends document images to Anthropic's API under YOUR key. Your key is stored in your database and never displayed again.",
+};
+
+// Model override is shown for any active provider except 'off' — placeholder
+// reflects what that provider actually calls its models, so it never reads
+// like Anthropic naming while Workers AI is selected.
+const MODEL_PLACEHOLDER: Record<'workers-ai' | 'anthropic', string> = {
+  'workers-ai': '@cf/meta/llama-3.1-8b-instruct',
+  anthropic: 'claude-opus-5',
 };
 
 function AiSection({
@@ -374,6 +383,12 @@ function AiSection({
 
   const activeProvider = providerPending ?? provider;
   const anyBusy = providerPending !== null || keyBusy !== null || modelBusy;
+
+  // A half-typed key left over from browsing the Anthropic tab must not
+  // linger once the user switches away — clear the draft, not the saved key.
+  useEffect(() => {
+    if (activeProvider !== 'anthropic') setKeyDraft('');
+  }, [activeProvider]);
 
   async function handleProviderChange(next: AiProvider) {
     if (next === provider || anyBusy) return;
@@ -461,90 +476,111 @@ function AiSection({
             {AI_PROVIDER_COPY[activeProvider]}
           </p>
 
-          {activeProvider === 'anthropic' && (
+          {/*
+            Key management and model override are each gated independently:
+            - Key management shows whenever a key is actually stored
+              (regardless of which provider is active — deleting a stored
+              credential must never require re-enabling Anthropic first), or
+              when Anthropic is active with no key yet (so there's a way to
+              add one).
+            - Model override shows for any provider except 'off' — Workers AI
+              has an override too, just with Workers-AI-shaped model names.
+          */}
+          {(keySet || activeProvider !== 'off') && (
             <div className="space-y-4 border-t border-border pt-4">
-              <Field label="Anthropic API key">
-                {keySet && !keyInputOpen ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <StatusBadge label="Key saved ✓" tone="positive" />
-                    <Button variant="ghost" size="sm" disabled={anyBusy} onClick={() => setKeyInputOpen(true)}>
-                      Replace
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={anyBusy}
-                      loading={keyBusy === 'remove'}
-                      onClick={() => void handleRemoveKey()}
-                    >
-                      Remove
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="flex flex-wrap items-center gap-2">
+              {(keySet || activeProvider === 'anthropic') && (
+                <div>
+                  {activeProvider === 'anthropic' && !keySet && (
+                    <p className="mb-2 text-xs font-medium text-caution">
+                      Add your Anthropic key below to start extracting.
+                    </p>
+                  )}
+                  <Field label="Anthropic API key">
+                    {!keyInputOpen ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusBadge label="Key saved ✓" tone="positive" />
+                        <Button variant="ghost" size="sm" disabled={anyBusy} onClick={() => setKeyInputOpen(true)}>
+                          Replace
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={anyBusy}
+                          loading={keyBusy === 'remove'}
+                          onClick={() => void handleRemoveKey()}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          type="password"
+                          autoComplete="off"
+                          value={keyDraft}
+                          disabled={anyBusy}
+                          onChange={(e) => setKeyDraft(e.target.value)}
+                          placeholder="sk-ant-…"
+                          className="max-w-xs"
+                        />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={anyBusy || !keyDraft.trim()}
+                          loading={keyBusy === 'save'}
+                          onClick={() => void handleSaveKey()}
+                        >
+                          Save key
+                        </Button>
+                        {keySet && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={anyBusy}
+                            onClick={() => {
+                              setKeyInputOpen(false);
+                              setKeyDraft('');
+                              setKeyError(null);
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                    <p className="mt-1.5 text-xs text-muted">
+                      Write-only — once saved, the key itself is never shown again.
+                    </p>
+                  </Field>
+                  <InlineError message={keyError} />
+                </div>
+              )}
+
+              {activeProvider !== 'off' && (
+                <div>
+                  <Field label="Model override (optional)" hint="Leave blank to use the default model.">
                     <Input
-                      type="password"
-                      autoComplete="off"
-                      value={keyDraft}
+                      value={modelDraft}
                       disabled={anyBusy}
-                      onChange={(e) => setKeyDraft(e.target.value)}
-                      placeholder="sk-ant-…"
+                      onChange={(e) => setModelDraft(e.target.value)}
+                      placeholder={MODEL_PLACEHOLDER[activeProvider]}
                       className="max-w-xs"
                     />
+                  </Field>
+                  <div className="mt-2 flex justify-end">
                     <Button
                       variant="ghost"
                       size="sm"
-                      disabled={anyBusy || !keyDraft.trim()}
-                      loading={keyBusy === 'save'}
-                      onClick={() => void handleSaveKey()}
+                      disabled={anyBusy || modelDraft.trim() === (model ?? '')}
+                      loading={modelBusy}
+                      onClick={() => void handleSaveModel()}
                     >
-                      Save key
+                      Save model
                     </Button>
-                    {keySet && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={anyBusy}
-                        onClick={() => {
-                          setKeyInputOpen(false);
-                          setKeyDraft('');
-                          setKeyError(null);
-                        }}
-                      >
-                        Cancel
-                      </Button>
-                    )}
                   </div>
-                )}
-                <p className="mt-1.5 text-xs text-muted">
-                  Write-only — once saved, the key itself is never shown again.
-                </p>
-              </Field>
-              <InlineError message={keyError} />
-
-              <div>
-                <Field label="Model override (optional)" hint="Leave blank to use the default model.">
-                  <Input
-                    value={modelDraft}
-                    disabled={anyBusy}
-                    onChange={(e) => setModelDraft(e.target.value)}
-                    placeholder="claude-opus-5"
-                    className="max-w-xs"
-                  />
-                </Field>
-                <div className="mt-2 flex justify-end">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={anyBusy || modelDraft.trim() === (model ?? '')}
-                    loading={modelBusy}
-                    onClick={() => void handleSaveModel()}
-                  >
-                    Save model
-                  </Button>
+                  <InlineError message={modelError} />
                 </div>
-                <InlineError message={modelError} />
-              </div>
+              )}
             </div>
           )}
         </div>

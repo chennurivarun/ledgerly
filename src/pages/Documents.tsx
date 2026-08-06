@@ -1,12 +1,13 @@
 // Documents page (spec §14) — upload + Drive inbox status + vault list.
 // objectKey is never rendered; no encryption claims are made anywhere here.
 import { Download, ExternalLink, FileText, FolderSync, Sparkles, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fmtDate } from '../../shared/format';
 import {
   MAX_FILE_BYTES,
   type DocumentMeta,
+  type ExtractionResult,
   type ExtractionStatus,
   type UploadResult,
 } from '../../shared/types';
@@ -61,14 +62,23 @@ const EXTRACTION_LABEL: Record<ExtractionStatus, string> = {
   dismissed: 'Dismissed',
   failed: 'Extraction failed',
 };
-// Re-extraction is only offered once a prior attempt is dismissed or failed;
-// 'suggested'/'confirmed' rows are reviewed or already resolved, and 'pending' is mid-flight.
-const REEXTRACTABLE_STATUSES: ExtractionStatus[] = ['dismissed', 'failed'];
+// Every non-terminal status keeps an escape hatch: dismissed/failed offer a
+// plain re-extract, and 'pending' gets one too (a "Try again" affordance) so
+// no row is ever permanently stuck — even though the current backend runs
+// the extraction synchronously, so a row rarely stays 'pending' in practice.
+const REEXTRACTABLE_STATUSES: ExtractionStatus[] = ['dismissed', 'failed', 'pending'];
+
+function extractButtonLabel(extraction: ExtractionResult | undefined): string {
+  if (!extraction) return 'Extract';
+  if (extraction.status === 'pending') return 'Try again';
+  return 'Re-extract';
+}
 
 export default function Documents() {
   const documents = useStore((s) => s.documents);
   const extractions = useStore((s) => s.extractions);
   const aiProvider = useStore((s) => s.settings.aiProvider);
+  const aiKeySet = useStore((s) => s.settings.aiKeySet);
   const uploadDocuments = useStore((s) => s.uploadDocuments);
   const extractDocument = useStore((s) => s.extractDocument);
   const refreshQuiet = useStore((s) => s.refreshQuiet);
@@ -86,10 +96,18 @@ export default function Documents() {
   // other row's Extract button is disabled while it runs (same rule
   // ManagedListSection applies to its add/remove controls).
   const [extractingId, setExtractingId] = useState<string | null>(null);
+  // Transient, per-document: a thrown request-level error (network/HTTP).
+  // Server-recorded failures use extraction.error instead — kept to exactly
+  // one persistent surface (the chip's row text) and one transient surface
+  // (this), no redundant toast on top of either.
   const [extractError, setExtractError] = useState<{ id: string; message: string } | null>(null);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
 
   const aiOn = aiProvider !== 'off';
+  // Anthropic without a stored key can't actually extract anything — treat
+  // it as not-ready rather than offering a button that will just fail.
+  const keyMissing = aiProvider === 'anthropic' && !aiKeySet;
+  const aiReady = aiOn && !keyMissing;
 
   async function handleExtract(doc: DocumentMeta) {
     setExtractingId(doc.id);
@@ -97,18 +115,31 @@ export default function Documents() {
     try {
       const result = await extractDocument(doc.id);
       if (result.status === 'suggested') {
-        setReviewingId(doc.id);
-      } else if (result.status === 'failed') {
-        toast('error', result.error ?? 'Extraction failed. Try again.');
+        // Never steal focus from an already-open review: if the user is
+        // mid-edit on a different document, this result waits for its own
+        // Review click instead of hijacking the open modal.
+        setReviewingId((current) => (current === null ? doc.id : current));
+      } else if (result.status === 'pending') {
+        toast('success', 'Still working — check back in a moment.');
       }
+      // 'failed' is surfaced persistently via the extraction row's own error
+      // text once the store updates — no toast needed on top of that.
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Could not extract that document.';
       setExtractError({ id: doc.id, message });
-      toast('error', message);
     } finally {
       setExtractingId(null);
     }
   }
+
+  // While anything is 'pending', poll for a resolved status instead of
+  // leaving the row stuck on "Extracting…" forever.
+  const hasPending = extractions.some((e) => e.status === 'pending');
+  useEffect(() => {
+    if (!hasPending) return;
+    const id = setInterval(() => void refreshQuiet(), 5000);
+    return () => clearInterval(id);
+  }, [hasPending, refreshQuiet]);
 
   async function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
@@ -277,6 +308,17 @@ export default function Documents() {
           </Link>
         </div>
       )}
+      {aiOn && keyMissing && (
+        // Anthropic selected but no key stored yet — extraction can't run,
+        // so don't offer buttons that would just fail; point at Settings.
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">
+          <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
+          <span>Add your Anthropic key in Settings to start extracting.</span>
+          <Link to="/settings" className="font-medium text-accent hover:underline">
+            Go to Settings
+          </Link>
+        </div>
+      )}
 
       <Card title={documents.length > 0 ? 'Document vault' : undefined}>
         {documents.length === 0 ? (
@@ -285,9 +327,13 @@ export default function Documents() {
           <ul className="divide-y divide-border">
             {documents.map((doc) => {
               const extraction = extractions.find((e) => e.documentId === doc.id);
-              const extractable = aiOn && isDocumentExtractable(doc.mimeType);
-              const showExtract = extractable && (!extraction || REEXTRACTABLE_STATUSES.includes(extraction.status));
-              const showReview = extractable && extraction?.status === 'suggested';
+              const mimeOk = isDocumentExtractable(doc.mimeType);
+              // Review just opens an already-fetched suggestion — it doesn't
+              // need a ready provider, only that AI isn't fully off.
+              const showReview = aiOn && mimeOk && extraction?.status === 'suggested';
+              // Starting a NEW extraction needs a ready provider (a key, if anthropic).
+              const showExtract =
+                aiReady && mimeOk && (!extraction || REEXTRACTABLE_STATUSES.includes(extraction.status));
               return (
                 <li key={doc.id} className="flex flex-wrap items-center gap-3 py-3">
                   <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
@@ -307,7 +353,16 @@ export default function Documents() {
                   <StatusBadge label={STATUS_LABEL[doc.status]} tone={STATUS_TONE[doc.status]} />
                   {extraction && <StatusBadge label={EXTRACTION_LABEL[extraction.status]} tone={EXTRACTION_TONE[extraction.status]} />}
                   {showReview && (
-                    <Button variant="subtle" size="sm" onClick={() => setReviewingId(doc.id)}>
+                    // Disabled parity with Extract: opening a review while
+                    // another document's extraction is in flight is exactly
+                    // the race that hijacks this modal when it resolves —
+                    // block the open, not just the close.
+                    <Button
+                      variant="subtle"
+                      size="sm"
+                      disabled={extractingId !== null}
+                      onClick={() => setReviewingId(doc.id)}
+                    >
                       Review
                     </Button>
                   )}
@@ -320,7 +375,7 @@ export default function Documents() {
                       onClick={() => void handleExtract(doc)}
                     >
                       <Sparkles className="size-3.5" aria-hidden />
-                      {extraction ? 'Re-extract' : 'Extract'}
+                      {extractButtonLabel(extraction)}
                     </Button>
                   )}
                   <a
@@ -371,7 +426,17 @@ export default function Documents() {
           const reviewExtraction = extractions.find((e) => e.documentId === reviewingId);
           if (!reviewDoc || !reviewExtraction) return null;
           return (
-            <ExtractionReviewModal doc={reviewDoc} extraction={reviewExtraction} onClose={() => setReviewingId(null)} />
+            // key={reviewingId} forces a full remount (and re-seed) whenever
+            // the reviewed document changes — belt-and-braces on top of the
+            // "only open if nothing is open" guard in handleExtract, so a
+            // stale draft can never render against a different document's
+            // image/attribution.
+            <ExtractionReviewModal
+              key={reviewingId}
+              doc={reviewDoc}
+              extraction={reviewExtraction}
+              onClose={() => setReviewingId(null)}
+            />
           );
         })()}
     </div>

@@ -13,10 +13,16 @@ import {
 
 export const LOW_CONFIDENCE_THRESHOLD = 0.6;
 
-/** True when a field is missing or the model wasn't confident — draws the eye, never blocks confirmation. */
+/**
+ * True when a field is missing or the model wasn't confident — draws the eye,
+ * never blocks confirmation. A missing/non-finite confidence (malformed data
+ * crossing the JSON boundary — undefined, NaN, Infinity) is treated as LOW,
+ * never as implicitly high; only a real number below the threshold is "safe".
+ */
 export function isLowConfidence<T>(field: ExtractedField<T> | undefined | null): boolean {
   if (!field) return true;
-  return field.value === null || field.confidence < LOW_CONFIDENCE_THRESHOLD;
+  if (field.value === null) return true;
+  return !Number.isFinite(field.confidence) || field.confidence < LOW_CONFIDENCE_THRESHOLD;
 }
 
 /** Extraction only makes sense for a rendered document: images and PDFs. */
@@ -35,7 +41,14 @@ export function isRealDateISO(value: string): boolean {
 /**
  * Resolve the extraction's category suggestion against the managed list
  * (case-insensitive, since the model doesn't know the user's exact casing).
- * Falls back to "Needs review" when present, else the first managed category.
+ * Falls back to "Needs review" when present — it's self-labelling, so
+ * showing it is honest. Never silently substitutes an arbitrary category
+ * (e.g. the first one) for an unmatched suggestion: a confident "Travel"
+ * suggestion quietly becoming "Housing" under a "Suggested by AI" footer
+ * would be an invented value, not a real fallback. Unmatched/missing
+ * suggestions with no "Needs review" category seed '' instead, forcing an
+ * explicit choice (the review form shows a "Choose a category…" placeholder
+ * and validation blocks confirm until one is picked).
  */
 export function resolveCategorySuggestion(suggested: string | null, categories: string[]): string {
   if (suggested) {
@@ -43,7 +56,7 @@ export function resolveCategorySuggestion(suggested: string | null, categories: 
     if (match) return match;
   }
   if (categories.includes(NEEDS_REVIEW)) return NEEDS_REVIEW;
-  return categories[0] ?? '';
+  return '';
 }
 
 export interface ExtractionDraft {

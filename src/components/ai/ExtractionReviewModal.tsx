@@ -14,6 +14,7 @@ import {
   isLowConfidence,
   seedExtractionDraft,
   validateExtractionDraft,
+  type ExtractionDraft,
 } from './extractionHelpers';
 
 const TYPE_OPTIONS: { value: TxType; label: string }[] = [
@@ -61,10 +62,24 @@ export function ExtractionReviewModal({
   const noCategories = settings.categories.length === 0;
   const isImage = doc.mimeType.startsWith('image/');
   const isPdf = doc.mimeType === 'application/pdf';
-  const previewUrl = api.documentDownloadUrl(doc.id);
+  const downloadUrl = api.documentDownloadUrl(doc.id);
+  // Images render inline regardless of Content-Disposition; the PDF <object>
+  // needs the worker's inline opt-in or the browser downloads the file
+  // instead of rendering it — a silent side effect just from opening Review.
+  const previewUrl = isPdf ? `${downloadUrl}?inline=1` : downloadUrl;
+
+  // Every draft edit clears a stale duplicate notice: a genuine second
+  // identical purchase is a real case, and the user editing the form (even a
+  // no-op re-select) signals "let me try confirming again" — the notice
+  // should not permanently swallow the Confirm button (AddEntryModal keeps
+  // Save live for the same kind of server response).
+  function updateDraft(updater: (d: ExtractionDraft) => ExtractionDraft) {
+    setDraft(updater);
+    setDuplicateNotice(false);
+  }
 
   function toggleTag(name: string) {
-    setDraft((d) => ({
+    updateDraft((d) => ({
       ...d,
       tags: d.tags.includes(name) ? d.tags.filter((t) => t !== name) : [...d.tags, name],
     }));
@@ -73,7 +88,7 @@ export function ExtractionReviewModal({
   function addNewTag() {
     const name = newTag.trim();
     if (!name) return;
-    setDraft((d) => (d.tags.some((t) => t.toLowerCase() === name.toLowerCase()) ? d : { ...d, tags: [...d.tags, name] }));
+    updateDraft((d) => (d.tags.some((t) => t.toLowerCase() === name.toLowerCase()) ? d : { ...d, tags: [...d.tags, name] }));
     setNewTag('');
   }
 
@@ -167,7 +182,7 @@ export function ExtractionReviewModal({
           ) : (
             <div className="flex flex-col items-center gap-2 p-4 text-center">
               <FileWarning className="size-6 text-muted" aria-hidden />
-              <a href={previewUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-accent hover:underline">
+              <a href={downloadUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-accent hover:underline">
                 Download to view
               </a>
             </div>
@@ -182,7 +197,7 @@ export function ExtractionReviewModal({
             </p>
           )}
 
-          <SegmentedControl ariaLabel="Entry type" options={TYPE_OPTIONS} value={draft.type} onChange={(v) => setDraft((d) => ({ ...d, type: v }))} />
+          <SegmentedControl ariaLabel="Entry type" options={TYPE_OPTIONS} value={draft.type} onChange={(v) => updateDraft((d) => ({ ...d, type: v }))} />
           <CautionNote field={extraction.type} />
 
           <div className="grid grid-cols-2 gap-3">
@@ -195,7 +210,7 @@ export function ExtractionReviewModal({
                 placeholder="0.00"
                 value={draft.total}
                 disabled={busy !== null}
-                onChange={(e) => setDraft((d) => ({ ...d, total: e.target.value }))}
+                onChange={(e) => updateDraft((d) => ({ ...d, total: e.target.value }))}
               />
               <CautionNote field={extraction.total} />
             </Field>
@@ -204,7 +219,7 @@ export function ExtractionReviewModal({
                 type="date"
                 value={draft.date}
                 disabled={busy !== null}
-                onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))}
+                onChange={(e) => updateDraft((d) => ({ ...d, date: e.target.value }))}
               />
               <CautionNote field={extraction.date} />
             </Field>
@@ -214,7 +229,7 @@ export function ExtractionReviewModal({
             <Input
               value={draft.merchant}
               disabled={busy !== null}
-              onChange={(e) => setDraft((d) => ({ ...d, merchant: e.target.value }))}
+              onChange={(e) => updateDraft((d) => ({ ...d, merchant: e.target.value }))}
               placeholder="e.g. Coffee shop"
             />
             <CautionNote field={extraction.merchant} />
@@ -225,7 +240,10 @@ export function ExtractionReviewModal({
               {noCategories ? (
                 <p className="text-xs text-muted">Add a category in Settings first.</p>
               ) : (
-                <Select value={draft.category} disabled={busy !== null} onChange={(e) => setDraft((d) => ({ ...d, category: e.target.value }))}>
+                <Select value={draft.category} disabled={busy !== null} onChange={(e) => updateDraft((d) => ({ ...d, category: e.target.value }))}>
+                  <option value="" disabled>
+                    Choose a category…
+                  </option>
                   {settings.categories.map((c) => (
                     <option key={c} value={c}>
                       {c}
@@ -239,7 +257,7 @@ export function ExtractionReviewModal({
               {noAccounts ? (
                 <p className="text-xs text-muted">Add an account in Settings first.</p>
               ) : (
-                <Select value={draft.account} disabled={busy !== null} onChange={(e) => setDraft((d) => ({ ...d, account: e.target.value }))}>
+                <Select value={draft.account} disabled={busy !== null} onChange={(e) => updateDraft((d) => ({ ...d, account: e.target.value }))}>
                   {settings.accounts.map((a) => (
                     <option key={a} value={a}>
                       {a}
