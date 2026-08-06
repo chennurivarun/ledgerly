@@ -1,0 +1,49 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-canvas: #f4f5f7;
+  --color-surface: #ffffff;
+  --color-ink: #1f2430;
+  --color-muted: #6b7280;
+  --color-border: #e5e7eb;
+  --color-accent: #6558d3;
+  --color-accent-deep: #5245b8;
+  --color-accent-soft: #eeecfb;
+  --color-positive: #1a9e5c;
+  --color-positive-soft: #e6f6ee;
+  --color-caution: #e07b16;
+  --color-caution-soft: #fdf1e3;
+  --color-info: #2d7ff9;
+  --color-info-soft: #e9f1fe;
+  --color-navy: #151b33;
+  --color-danger: #d43d3d;
+  --color-danger-soft: #fdecec;
+  --radius-card: 16px;
+}
+
+html {
+  background-color: var(--color-canvas);
+}
+
+body {
+  margin: 0;
+  color: var(--color-ink);
+  background-color: var(--color-canvas);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+  font-size: 15px; /* spec §1.13: body 14–16px; nothing user-facing below 12px */
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin, unobtrusive scrollbars for horizontally scrollable rails */
+.scroll-rail {
+  scrollbar-width: thin;
+}

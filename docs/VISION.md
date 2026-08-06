@@ -1,0 +1,128 @@
+# Ledgerly — Vision
+
+> **AI-based finance management where the intelligence comes to your data —
+> your data never goes to the intelligence.**
+
+Ledgerly is a private, self-hosted finance dashboard that runs in **your own
+Cloudflare account**: your transactions in your D1 database, your receipts in
+your R2 bucket, no vendor in between. The vision is to grow it into the
+privacy-first alternative for AI-assisted money management — first for
+individuals, then for freelancers and small businesses.
+
+## Why this, why now
+
+In mid-2026 the "connect every account and let AI analyze it" lane was claimed
+by the biggest player possible: OpenAI shipped bank-linked personal-finance
+features inside ChatGPT (Plaid, 12,000+ institutions, an Intuit partnership).
+Competing with that on connectivity would be pointless. But that product has a
+structural ceiling it can never cross: **your complete financial life lives on
+someone else's servers and feeds someone else's models.**
+
+Meanwhile, the open-source finance world (Actual Budget, Firefly III,
+Ghostfolio, Maybe/Sure) proved lasting demand for self-hosted money tools —
+tens of thousands of GitHub stars, real communities — yet **none of them ship
+native AI**, and their communities' loudest complaints are import friction and
+missing intelligence.
+
+That gap is the vision: **the trust model of self-hosted open source, with the
+intelligence of a modern AI finance app.**
+
+## What exists today
+
+A complete, tested v1 (no AI yet, deliberately):
+
+- Nine pages: dashboard, transactions, recurring, subscriptions, budgets,
+  goals, documents, rules, settings — with a first-run onboarding wizard and
+  30-currency display support.
+- Deterministic engines with real test suites: duplicate-fingerprint imports,
+  an auditable recurring/subscription detection algorithm, a rules engine,
+  strict never-guess CSV parsing (ambiguity always asks the user).
+- Documents vault: original receipt/statement bytes stored in R2.
+- A full data-erase flow, empty-start guarantee (no sample data, ever), and a
+  `/api/drive-sync` contract ready for scheduled import runners.
+
+## Principles (non-negotiable)
+
+1. **Your data stays in your infrastructure.** Default deployment is the
+   user's own Cloudflare account. Nothing phones home.
+2. **Deterministic core, AI assist.** Money math — totals, dedupe, recurring
+   detection, budgets — stays deterministic and auditable. AI suggests;
+   it never silently writes.
+3. **Never guess.** Ambiguous imports ask. Uncertain extractions go to
+   review. Confirm-before-write everywhere.
+4. **No sample data, no dark patterns, no invented numbers.** Empty states
+   are honest; trends render only when real data supports them.
+
+## Roadmap
+
+### Phase 1 — Open source (next)
+
+License: **AGPL-3.0**. Every comparable app with a hosted arm chose it
+(Firefly III, Ghostfolio, Maybe); the one permissive-licensed peer (Actual,
+MIT) watched third parties capture its hosting revenue. AGPL keeps a future
+first-party cloud viable while staying genuinely OSI-approved open source —
+which fair-source licenses are not, at real cost to directory listings and
+launch trust.
+
+Launch checklist: LICENSE + CONTRIBUTING + code of conduct, one-command
+deploy docs ("deploy to your own Cloudflare in 10 minutes"), screenshots and
+a public demo instance, then a Show HN positioned as the *open-source,
+privacy-first alternative to AI finance apps*. Growth follows the proven
+playbook (Plausible, Cal.com): "open-source alternative to X" content, not
+star-chasing.
+
+### Phase 2 — The AI ladder (evidence-ranked: impact × feasibility)
+
+What the market data says is genuinely sticky is *invisible* AI judged by
+friction reduction — not chat gimmicks (only ~18% of consumers are
+comfortable letting AI make financial decisions autonomously).
+
+1. **Categorization that learns from corrections.** AI fallback where
+   deterministic rules don't match; user corrections get promoted into new
+   rules. The existing rules engine stays authoritative.
+2. **Receipt & statement extraction.** The bytes are already in R2; add an
+   extraction step (OCR + schema-constrained LLM, per-field confidence,
+   review queue for anything uncertain). Two paths from one feature:
+   **Workers AI** (inference inside the user's own Cloudflare account — the
+   privacy-first default) and **bring-your-own-key** frontier models for
+   maximum accuracy. Cost: cents per document or less.
+3. **Cash-flow forecasting** on top of the recurring-detection engine — the
+   numeric projection stays deterministic and auditable; AI narrates
+   scenarios in plain language.
+4. **Natural-language search / MCP.** Read-only. Expose the user's data as
+   an MCP server so they can point *their own* AI client at *their own*
+   finances — "chat with your money" without the data ever leaving their
+   control.
+5. **Proactive briefings & anomaly alerts** — last, once 1–3 generate the
+   signal that makes alerts useful instead of noisy.
+
+### Phase 3 — Sustainability and the business wedge
+
+- **Ledgerly Cloud**: first-party hosting for people who don't want to
+  self-host. Same codebase, no feature gap for individuals — the paid
+  product sells convenience, not ransomed features.
+- **Freelancer / micro-business tier** (Cal.com-style: a separately-licensed
+  enterprise directory, core stays AGPL): business-expense tagging, receipt-
+  to-ledger automation, multi-user. The wedge is not "cheaper QuickBooks" —
+  free incumbents own that — it's the same data-ownership thesis plus AI
+  automation. The segment's 2026 lesson (Botkeeper's shutdown) is that
+  funding-dependent platforms die and take client data workflows with them;
+  a tool that runs in the customer's own account structurally cannot.
+
+## Honest risks
+
+- **Solo-maintainer burnout** is the #1 documented killer of projects like
+  this. Scope must stay ruthless; the deterministic core must stay small.
+- **Stars are not revenue.** Maybe Finance had 54k stars, VC funding, and a
+  beautiful product — it was archived in 2025 and survives only as a
+  community fork. The models that worked (Plausible: ~$3.5M ARR,
+  bootstrapped) took years of content-driven growth.
+- **AI trust is fragile in finance.** Cleo's $17M FTC settlement shows how
+  fast AI + money + dark patterns destroys trust. Our principles above are
+  the moat; violating them once forfeits it.
+
+---
+
+*Research basis: competitive and licensing landscape surveyed August 2026
+(OSS finance apps, AI finance incumbents, open-core case studies). Detailed
+findings with sources live in the project's research notes.*

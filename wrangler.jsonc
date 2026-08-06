@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ledgerly",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-06-01",
+  "assets": {
+    "directory": "./dist/client",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ledgerly",
+      // Placeholder for local dev. Before `npm run deploy`, create a real DB with
+      // `wrangler d1 create ledgerly` and paste its id here.
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "ledgerly-documents"
+    }
+  ],
+  "observability": { "enabled": true }
+}
