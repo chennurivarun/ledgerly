@@ -3,6 +3,7 @@ import {
   applyDraftPatch,
   buildStatementConfirmInput,
   canRowBeSelected,
+  filterBySnapshot,
   isCleanOutcome,
   missingRowFields,
   rowLowConfidenceFields,
@@ -51,7 +52,7 @@ function insertResult(overrides: Partial<BatchInsertResult> = {}): BatchInsertRe
   return { inserted: 0, duplicates: 0, insertedRows: [], errors: [], ...overrides };
 }
 
-describe('rowLowConfidenceFields / isRowLowConfidence', () => {
+describe('rowLowConfidenceFields', () => {
   it('flags nothing for a fully confident row', () => {
     expect(rowLowConfidenceFields(row())).toEqual([]);
   });
@@ -289,6 +290,33 @@ describe('selectableRows', () => {
   it('excludes a row with no draft at all', () => {
     const rows = [row({ id: 'a' })];
     expect(selectableRows(rows, {})).toEqual([]);
+  });
+});
+
+describe('filterBySnapshot', () => {
+  it('keeps a snapshot member visible regardless of its current flag/edit state', () => {
+    const rows = [row({ id: 'a' }), row({ id: 'b' })];
+    const snapshot = new Set(['a']);
+    // filterBySnapshot only honors frozen id membership — it never looks at
+    // whether row 'a' still has any low-confidence flags right now. This is
+    // the fix for the mid-edit unmount: editing a snapshot member so its
+    // flags clear must NOT drop it from the filtered view.
+    expect(filterBySnapshot(rows, snapshot).map((r) => r.id)).toEqual(['a']);
+  });
+
+  it('drops a row not in the snapshot', () => {
+    const rows = [row({ id: 'a' }), row({ id: 'b' })];
+    expect(filterBySnapshot(rows, new Set(['b'])).map((r) => r.id)).toEqual(['b']);
+  });
+
+  it('returns every row unfiltered when snapshot is null (no filter active)', () => {
+    const rows = [row({ id: 'a' }), row({ id: 'b' })];
+    expect(filterBySnapshot(rows, null)).toEqual(rows);
+  });
+
+  it('returns nothing for an empty snapshot', () => {
+    const rows = [row({ id: 'a' }), row({ id: 'b' })];
+    expect(filterBySnapshot(rows, new Set())).toEqual([]);
   });
 });
 

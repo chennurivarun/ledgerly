@@ -241,21 +241,29 @@ export default function Documents() {
   // effect from re-running on every poll tick or busy transition.
   const closeReview = useCallback(() => setReviewing(null), []);
 
-  // Defensive cleanup: if the document (or its extraction/statement record)
-  // a review modal points at disappears from the store — deleted, or wiped
-  // by a background refresh — clear `reviewing` rather than leaving it
-  // pointing at nothing. The modal already renders null in that case (see
-  // the lookups below), but `reviewing` staying set would keep the polling
-  // effect above paused forever with no visible modal to show for it.
+  // Defensive cleanup: if the DOCUMENT a review modal points at disappears
+  // (deleted, or dropped by a background refresh) — clear `reviewing` and
+  // say why, rather than leaving it pointing at nothing silently. Gated on
+  // the document only: that's the unambiguous case, since the extraction/
+  // statement record is itself derived from the document server-side.
+  // Deliberately NOT gated on the extraction/statement record's own rows
+  // changing shape — a statement's rows can legitimately go empty mid-triage
+  // (see mergeStatements in store.ts, which exists specifically to protect
+  // an in-progress review from that) without the document itself vanishing,
+  // and force-clearing on that would fight the very fix meant to preserve it.
   useEffect(() => {
     if (!reviewing) return;
     const docStillExists = documents.some((d) => d.id === reviewing.id);
-    const targetStillExists =
-      reviewing.kind === 'extract'
-        ? extractions.some((e) => e.documentId === reviewing.id)
-        : statements.some((s) => s.documentId === reviewing.id);
-    if (!docStillExists || !targetStillExists) setReviewing(null);
-  }, [reviewing, documents, extractions, statements]);
+    if (!docStillExists) {
+      setReviewing(null);
+      toast(
+        'error',
+        reviewing.kind === 'statement'
+          ? 'That statement is no longer available.'
+          : 'That document is no longer available.',
+      );
+    }
+  }, [reviewing, documents, toast]);
 
   async function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
@@ -435,6 +443,19 @@ export default function Documents() {
           </Link>
         </div>
       )}
+      {aiReady && aiProvider === 'workers-ai' && documents.some((d) => d.mimeType === 'application/pdf') && (
+        // Shown once for the whole vault (same convention as the two
+        // banners above), not per row — every PDF's "Read as statement"
+        // button is disabled for the same reason, so repeating it on each
+        // row would just be noise.
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">
+          <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
+          <span>PDF statements need the Anthropic provider — Workers AI can&apos;t read them.</span>
+          <Link to="/settings" className="font-medium text-accent hover:underline">
+            Switch in Settings
+          </Link>
+        </div>
+      )}
 
       <Card title={documents.length > 0 ? 'Document vault' : undefined}>
         {documents.length === 0 ? (
@@ -546,27 +567,24 @@ export default function Documents() {
                     </Button>
                   )}
                   {showStatementAction && (
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        loading={running?.id === doc.id && running.kind === 'statement'}
-                        disabled={
-                          statementBlockedByProvider ||
-                          (running !== null && !(running.id === doc.id && running.kind === 'statement'))
-                        }
-                        title={statementBlockedByProvider ? 'PDF statements need the Anthropic provider' : undefined}
-                        onClick={() => void handleReadStatement(doc)}
-                      >
-                        <Sparkles className="size-3.5" aria-hidden />
-                        {statementButtonLabel(statement)}
-                      </Button>
-                      {/* Visible, not title-only: a title attribute is
-                          unreachable on a disabled, non-focusable control. */}
-                      {statementBlockedByProvider && (
-                        <span className="text-xs text-muted">PDF statements need the Anthropic provider.</span>
-                      )}
-                    </div>
+                    // The reason for the disabled state (Workers AI can't
+                    // read PDF statements) is explained once at the page
+                    // level above, not repeated per row — matches the
+                    // !aiOn/keyMissing banners' once-per-vault convention.
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      loading={running?.id === doc.id && running.kind === 'statement'}
+                      disabled={
+                        statementBlockedByProvider ||
+                        (running !== null && !(running.id === doc.id && running.kind === 'statement'))
+                      }
+                      title={statementBlockedByProvider ? 'PDF statements need the Anthropic provider' : undefined}
+                      onClick={() => void handleReadStatement(doc)}
+                    >
+                      <Sparkles className="size-3.5" aria-hidden />
+                      {statementButtonLabel(statement)}
+                    </Button>
                   )}
                   <a
                     href={api.documentDownloadUrl(doc.id)}

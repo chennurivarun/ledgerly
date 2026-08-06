@@ -9,7 +9,7 @@ import type {
   StatementRow,
   TxType,
 } from '../../../shared/types';
-import { isLowConfidence, isRealDateISO, resolveCategorySuggestion } from './extractionHelpers';
+import { amountCents, isLowConfidence, isRealDateISO, resolveCategorySuggestion } from './extractionHelpers';
 
 /** Local, per-row editable state held until the user confirms the batch. */
 export interface StatementRowDraft {
@@ -42,10 +42,6 @@ export function rowLowConfidenceFields(row: StatementRow): string[] {
   return flagged;
 }
 
-export function isRowLowConfidence(row: StatementRow): boolean {
-  return rowLowConfidenceFields(row).length > 0;
-}
-
 /**
  * A low-confidence marker only stays useful while it still describes what's
  * on screen: once the user edits a flagged field away from the value
@@ -75,18 +71,6 @@ export function visibleLowConfidenceFields(
         return true;
     }
   });
-}
-
-/**
- * Rounds a numeric amount string to integer cents; null when not a real
- * number. Single source of truth for "does this amount actually round to at
- * least one cent" — shared by missingRowFields and buildStatementConfirmInput
- * so a sub-cent value like "0.004" (which passes a naive `> 0` check but
- * rounds to 0 once stored) can't validate one way and post another.
- */
-function amountCents(amount: string): number | null {
-  const n = Number(amount);
-  return Number.isFinite(n) ? Math.round(n * 100) : null;
 }
 
 /**
@@ -166,6 +150,18 @@ export function selectableRows(
     const d = drafts[row.id];
     return !!d && d.selected && canRowBeSelected(d);
   });
+}
+
+/**
+ * Filters `rows` down to a frozen id-set snapshot rather than a live
+ * predicate. Deliberately ignores each row's CURRENT state (e.g. its
+ * present-tense low-confidence flags) — a live filter over a field that an
+ * edit itself can change (like "still flagged?") would unmount the very row
+ * under the user's cursor the moment their edit resolves the flag, dropping
+ * focus. `null` means "no filter active" (every row passes).
+ */
+export function filterBySnapshot(rows: StatementRow[], snapshot: Set<string> | null): StatementRow[] {
+  return snapshot ? rows.filter((r) => snapshot.has(r.id)) : rows;
 }
 
 /**

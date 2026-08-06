@@ -16,11 +16,11 @@ import type {
 } from '../../../shared/types';
 import { useStore } from '../../store';
 import { Button, InlineError, Input, Modal, Select } from '../ui';
-import { ConfirmDialog } from '../manage/ConfirmDialog';
 import {
   applyDraftPatch,
   buildStatementConfirmInput,
   canRowBeSelected,
+  filterBySnapshot,
   isCleanOutcome,
   missingRowFields,
   seedStatementRowDraft,
@@ -71,7 +71,12 @@ export function StatementReviewModal({
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<BatchInsertResult | null>(null);
   const [busy, setBusy] = useState<'confirm' | 'dismiss' | null>(null);
-  const [onlyFlagged, setOnlyFlagged] = useState(false);
+  // A frozen id-set, not a live predicate: filtering by "is this row
+  // CURRENTLY flagged" would unmount the row under the user's cursor the
+  // instant their edit clears its last flag (visibleRows drops it, focus
+  // falls to body). Snapshotting on toggle-on keeps the filtered set stable
+  // through edits; re-toggling off then on again takes a fresh snapshot.
+  const [flaggedSnapshot, setFlaggedSnapshot] = useState<Set<string> | null>(null);
   const [confirmingDismissAll, setConfirmingDismissAll] = useState(false);
 
   // Server truth, not a guess: after a confirm, store.confirmStatementRows
@@ -101,17 +106,32 @@ export function StatementReviewModal({
   // Same identity-stability requirement as ExtractionReviewModal's
   // guardedClose: the frozen Modal re-runs its focus-trap effect whenever the
   // `onClose` it receives changes identity, so this must stay referentially
-  // stable across re-renders (busy/confirmingDismissAll read through refs,
-  // not closures). Also blocked while the nested "Dismiss all?" ConfirmDialog
-  // is open, so an Escape aimed at that dialog can't fall through and close
-  // this modal underneath it too.
+  // stable across re-renders (busy read through a ref, not a closure).
   const busyRef = useRef(busy);
   busyRef.current = busy;
-  const confirmingDismissAllRef = useRef(confirmingDismissAll);
-  confirmingDismissAllRef.current = confirmingDismissAll;
   const guardedClose = useCallback(() => {
-    if (!busyRef.current && !confirmingDismissAllRef.current) onClose();
+    if (!busyRef.current) onClose();
   }, [onClose]);
+
+  // The "Dismiss all?" confirmation is an inline strip in the footer, not a
+  // second nested Modal — so there's no second document-level Escape
+  // listener to fight with the frozen Modal's own. Escape should still just
+  // hide the strip rather than closing the whole review, though: a listener
+  // registered in the CAPTURE phase runs before the Modal's own bubble-phase
+  // listener even though both are on `document` (capture always precedes
+  // bubble, regardless of registration order), so stopPropagation here wins
+  // the race without any ref-based coordination with guardedClose.
+  useEffect(() => {
+    if (!confirmingDismissAll) return;
+    const onKeyCapture = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setConfirmingDismissAll(false);
+      }
+    };
+    document.addEventListener('keydown', onKeyCapture, { capture: true });
+    return () => document.removeEventListener('keydown', onKeyCapture, { capture: true });
+  }, [confirmingDismissAll]);
 
   // Stable across renders (functional setState — doesn't close over `drafts`)
   // so the memoized row component below only re-renders the row that
@@ -127,25 +147,15 @@ export function StatementReviewModal({
     setOutcome(null);
   }, []);
 
-  function applySelection(pick: (row: StatementRow, draft: StatementRowDraft) => boolean) {
-    setDrafts((prev) => {
-      const next = { ...prev };
-      for (const row of pendingRows) {
-        const d = prev[row.id];
-        if (!d) continue;
-        next[row.id] = { ...d, selected: pick(row, d) };
-      }
-      return next;
-    });
-    setOutcome(null);
-  }
-
   const selectedRows = useMemo(() => selectableRows(pendingRows, drafts), [pendingRows, drafts]);
 
   // Rows still worth a second look: the AI's original suggestion was
   // low-confidence for at least one field the user hasn't since edited away.
   // Printed statement order stays the primary sort (it's the cross-check
-  // against the source PDF) — this is a filter, not a reorder.
+  // against the source PDF) — this is a filter, not a reorder. Stays LIVE
+  // (unlike the snapshot below) because it only feeds the toolbar button's
+  // count — watching it tick down as the user fixes rows is good feedback,
+  // and it never controls what's mounted in the table.
   const flaggedRowIds = useMemo(() => {
     const ids = new Set<string>();
     for (const row of pendingRows) {
@@ -155,10 +165,30 @@ export function StatementReviewModal({
     return ids;
   }, [pendingRows, drafts, settings.categories]);
 
+  // Filtered by the frozen snapshot (see flaggedSnapshot above), not by the
+  // live flaggedRowIds — this is what's actually mounted in the table.
   const visibleRows = useMemo(
-    () => (onlyFlagged ? pendingRows.filter((r) => flaggedRowIds.has(r.id)) : pendingRows),
-    [pendingRows, flaggedRowIds, onlyFlagged],
+    () => filterBySnapshot(pendingRows, flaggedSnapshot),
+    [pendingRows, flaggedSnapshot],
   );
+
+  // Bulk-select actions are scoped to what's currently on screen
+  // (screen-is-the-scope): with the "Needs verification" filter active,
+  // "Select all" must only touch the rows the user can actually see, not
+  // every pending row hidden behind the filter. The footer's Import count
+  // stays global (selectedRows, derived from all of `drafts`) regardless.
+  function applySelection(pick: (row: StatementRow, draft: StatementRowDraft) => boolean) {
+    setDrafts((prev) => {
+      const next = { ...prev };
+      for (const row of visibleRows) {
+        const d = prev[row.id];
+        if (!d) continue;
+        next[row.id] = { ...d, selected: pick(row, d) };
+      }
+      return next;
+    });
+    setOutcome(null);
+  }
 
   const noAccounts = settings.accounts.length === 0;
   const noCategories = settings.categories.length === 0;
@@ -218,28 +248,54 @@ export function StatementReviewModal({
       onClose={guardedClose}
       xl
       footer={
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <Button
-            variant="ghost"
-            onClick={() => (pendingRows.length > 1 ? setConfirmingDismissAll(true) : void handleDismissAll())}
-            disabled={busy !== null}
-            loading={busy === 'dismiss'}
-          >
-            Dismiss all
-          </Button>
-          <div className="flex gap-2">
-            <Button variant="ghost" onClick={onClose} disabled={busy !== null}>
-              Cancel
-            </Button>
-            <Button
-              onClick={() => void handleConfirm()}
-              disabled={busy !== null || selectedRows.length === 0 || noAccounts}
-              loading={busy === 'confirm'}
-            >
-              Import {selectedRows.length} transaction{selectedRows.length === 1 ? '' : 's'}
-            </Button>
+        confirmingDismissAll ? (
+          // Inline strip, not a second nested Modal (a ConfirmDialog here
+          // would unlock body scroll on its own cancel and double up
+          // aria-modal against the review modal underneath it). Escape is
+          // handled separately above; this is just the visible affordance.
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-medium text-danger">
+              Dismiss all {pendingRows.length} remaining row{pendingRows.length === 1 ? '' : 's'}? This can&apos;t be
+              undone.
+            </p>
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={() => setConfirmingDismissAll(false)} disabled={busy !== null}>
+                Keep
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => void handleDismissAll()}
+                disabled={busy !== null}
+                loading={busy === 'dismiss'}
+              >
+                Dismiss
+              </Button>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => (pendingRows.length > 1 ? setConfirmingDismissAll(true) : void handleDismissAll())}
+              disabled={busy !== null}
+              loading={busy === 'dismiss'}
+            >
+              Dismiss all
+            </Button>
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={onClose} disabled={busy !== null}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => void handleConfirm()}
+                disabled={busy !== null || selectedRows.length === 0 || noAccounts}
+                loading={busy === 'confirm'}
+              >
+                Import {selectedRows.length} transaction{selectedRows.length === 1 ? '' : 's'}
+              </Button>
+            </div>
+          </div>
+        )
       }
     >
       <div className="space-y-4">
@@ -308,9 +364,9 @@ export function StatementReviewModal({
                   Select none
                 </Button>
                 <Button
-                  variant={onlyFlagged ? 'subtle' : 'ghost'}
+                  variant={flaggedSnapshot ? 'subtle' : 'ghost'}
                   size="sm"
-                  onClick={() => setOnlyFlagged((v) => !v)}
+                  onClick={() => setFlaggedSnapshot((prev) => (prev === null ? new Set(flaggedRowIds) : null))}
                   disabled={busy !== null}
                 >
                   Needs verification ({flaggedRowIds.size})
@@ -385,22 +441,6 @@ export function StatementReviewModal({
           </>
         )}
       </div>
-
-      {confirmingDismissAll && (
-        <ConfirmDialog
-          title="Dismiss this statement?"
-          message={
-            <p>
-              This dismisses all {pendingRows.length} remaining row{pendingRows.length === 1 ? '' : 's'} from this
-              statement — none of them will be imported. This can&apos;t be undone.
-            </p>
-          }
-          confirmLabel="Dismiss all"
-          busy={busy === 'dismiss'}
-          onConfirm={() => void handleDismissAll()}
-          onCancel={() => setConfirmingDismissAll(false)}
-        />
-      )}
     </Modal>
   );
 }
