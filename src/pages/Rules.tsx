@@ -15,8 +15,9 @@
 // client-built rule writes (toggle/delete — their payload wouldn't include
 // the new rule yet) are blocked, and vice versa. Accept-vs-accept is safe —
 // the payload is the suggestion's own merchant/category, not client rule
-// state, and the server echoes the full rules list back — so the other
-// suggestion cards stay usable while one card's request is in flight.
+// state, but two accepts' RESPONSES can land out of order and the later
+// stale rules list would overwrite the newer one client-side — so accepts
+// serialize against each other too. Only dismisses stay per-card.
 import { Pencil, Plus, SlidersHorizontal, Tags, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { Rule } from '../../shared/types';
@@ -229,7 +230,7 @@ export default function Rules() {
                   <Button
                     size="sm"
                     loading={cardBusy && suggestionAction?.kind === 'accept'}
-                    disabled={cardBusy || ruleListWriteBusy}
+                    disabled={cardBusy || rulesBusy}
                     onClick={() => void handleAcceptSuggestion(suggestion.id)}
                   >
                     Create rule
