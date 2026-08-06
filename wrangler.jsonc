@@ -23,8 +23,14 @@
       "bucket_name": "ledgerly-documents"
     }
   ],
-  "ai": {
-    "binding": "AI"
-  },
+  // Workers AI powers the in-account receipt-extraction provider. The binding
+  // is commented out by default because `vite dev` refuses to start with it
+  // present unless you are authenticated to Cloudflare (`npx wrangler login`
+  // or CLOUDFLARE_API_TOKEN) — and local-first dev must work with neither.
+  // Uncomment to enable the "Workers AI" provider (dev needs auth; deploys
+  // always have it). The Anthropic BYOK provider works without this binding.
+  // "ai": {
+  //   "binding": "AI"
+  // },
   "observability": { "enabled": true }
 }

@@ -63,6 +63,23 @@ local D1/R2 via miniflare); data persists in `.wrangler/state/`.
 The free tiers of Workers, D1, and R2 are far more than a personal finance
 app needs.
 
+### AI receipt extraction (optional)
+
+Settings → AI lets Ledgerly suggest transactions from stored receipts. Two
+providers, off by default:
+
+- **Workers AI** — inference runs inside your own Cloudflare account.
+  Uncomment the `ai` binding in [wrangler.jsonc](wrangler.jsonc) to enable it
+  (local dev then requires `npx wrangler login`; deployed Workers always
+  qualify).
+- **Anthropic (bring your own key)** — higher accuracy; sends document images
+  to Anthropic's API under your key. The key is stored in your database,
+  write-only, and never displayed again. Works in local dev with no
+  Cloudflare auth.
+
+Extraction only ever *suggests* — you review and confirm every transaction,
+and the same duplicate detection applies as for any other import.
+
 ### Scheduled imports
 
 `GET/POST /api/drive-sync` implements a complete import contract
