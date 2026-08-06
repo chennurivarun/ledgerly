@@ -1,12 +1,20 @@
 // Documents page (spec §14) — upload + Drive inbox status + vault list.
 // objectKey is never rendered; no encryption claims are made anywhere here.
-import { Download, ExternalLink, FileText, FolderSync, Trash2 } from 'lucide-react';
+import { Download, ExternalLink, FileText, FolderSync, Sparkles, Trash2 } from 'lucide-react';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { fmtDate } from '../../shared/format';
-import { MAX_FILE_BYTES, type DocumentMeta, type UploadResult } from '../../shared/types';
+import {
+  MAX_FILE_BYTES,
+  type DocumentMeta,
+  type ExtractionStatus,
+  type UploadResult,
+} from '../../shared/types';
 import { api } from '../api';
+import { ExtractionReviewModal } from '../components/ai/ExtractionReviewModal';
+import { isDocumentExtractable } from '../components/ai/extractionHelpers';
 import { ConfirmDialog } from '../components/manage/ConfirmDialog';
-import { StatusBadge } from '../components/manage/StatusBadge';
+import { StatusBadge, type BadgeTone } from '../components/manage/StatusBadge';
 import { useDriveSync } from '../components/manage/useDriveSync';
 import { useStore } from '../store';
 import { Button, Card, EmptyState, InlineError, Input, Spinner } from '../components/ui';
@@ -38,9 +46,31 @@ const STATUS_TONE = { queued: 'info', stored: 'positive', review: 'caution' } as
 const STATUS_LABEL = { queued: 'Queued', stored: 'Stored', review: 'Review' } as const;
 const SYNC_TONE = { complete: 'positive', partial: 'caution', error: 'danger' } as const;
 
+// Extraction status chip, shown alongside the document's own status badge.
+const EXTRACTION_TONE: Record<ExtractionStatus, BadgeTone> = {
+  pending: 'info',
+  suggested: 'caution',
+  confirmed: 'positive',
+  dismissed: 'neutral',
+  failed: 'danger',
+};
+const EXTRACTION_LABEL: Record<ExtractionStatus, string> = {
+  pending: 'Extracting…',
+  suggested: 'Needs review',
+  confirmed: 'Extracted',
+  dismissed: 'Dismissed',
+  failed: 'Extraction failed',
+};
+// Re-extraction is only offered once a prior attempt is dismissed or failed;
+// 'suggested'/'confirmed' rows are reviewed or already resolved, and 'pending' is mid-flight.
+const REEXTRACTABLE_STATUSES: ExtractionStatus[] = ['dismissed', 'failed'];
+
 export default function Documents() {
   const documents = useStore((s) => s.documents);
+  const extractions = useStore((s) => s.extractions);
+  const aiProvider = useStore((s) => s.settings.aiProvider);
   const uploadDocuments = useStore((s) => s.uploadDocuments);
+  const extractDocument = useStore((s) => s.extractDocument);
   const refreshQuiet = useStore((s) => s.refreshQuiet);
   const toast = useStore((s) => s.toast);
   const drive = useDriveSync();
@@ -52,6 +82,33 @@ export default function Documents() {
   const [pendingDelete, setPendingDelete] = useState<DocumentMeta | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Busy-flag discipline: only one document can extract at a time — every
+  // other row's Extract button is disabled while it runs (same rule
+  // ManagedListSection applies to its add/remove controls).
+  const [extractingId, setExtractingId] = useState<string | null>(null);
+  const [extractError, setExtractError] = useState<{ id: string; message: string } | null>(null);
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
+
+  const aiOn = aiProvider !== 'off';
+
+  async function handleExtract(doc: DocumentMeta) {
+    setExtractingId(doc.id);
+    setExtractError(null);
+    try {
+      const result = await extractDocument(doc.id);
+      if (result.status === 'suggested') {
+        setReviewingId(doc.id);
+      } else if (result.status === 'failed') {
+        toast('error', result.error ?? 'Extraction failed. Try again.');
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Could not extract that document.';
+      setExtractError({ id: doc.id, message });
+      toast('error', message);
+    } finally {
+      setExtractingId(null);
+    }
+  }
 
   async function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
@@ -209,43 +266,83 @@ export default function Documents() {
         </Card>
       </div>
 
+      {!aiOn && (
+        // Shown once for the whole vault, not per row (per-row noise would
+        // repeat the same "it's off" message on every extractable document).
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">
+          <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
+          <span>AI receipt extraction is off.</span>
+          <Link to="/settings" className="font-medium text-accent hover:underline">
+            Enable it in Settings
+          </Link>
+        </div>
+      )}
+
       <Card title={documents.length > 0 ? 'Document vault' : undefined}>
         {documents.length === 0 ? (
           <EmptyState icon={FileText} title="No documents yet. Upload a file or add one to your Drive inbox." />
         ) : (
           <ul className="divide-y divide-border">
-            {documents.map((doc) => (
-              <li key={doc.id} className="flex flex-wrap items-center gap-3 py-3">
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
-                  <FileText className="size-4" aria-hidden />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-semibold">{doc.filename}</p>
-                  <p className="mt-0.5 text-xs text-muted">
-                    {mimeLabel(doc.mimeType)} · {formatBytes(doc.size)} ·{' '}
-                    {doc.source === 'google-drive' ? 'Google Drive' : 'Upload'} · {fmtDate(doc.createdAt.slice(0, 10))}
-                  </p>
-                </div>
-                <StatusBadge label={STATUS_LABEL[doc.status]} tone={STATUS_TONE[doc.status]} />
-                <a
-                  href={api.documentDownloadUrl(doc.id)}
-                  target="_blank"
-                  rel="noreferrer"
-                  aria-label={`Download ${doc.filename}`}
-                  className="flex size-9 items-center justify-center rounded-lg text-muted hover:bg-canvas hover:text-ink"
-                >
-                  <Download className="size-4" aria-hidden />
-                </a>
-                <button
-                  type="button"
-                  aria-label={`Delete ${doc.filename}`}
-                  onClick={() => setPendingDelete(doc)}
-                  className="flex size-9 items-center justify-center rounded-lg text-muted hover:bg-danger-soft hover:text-danger"
-                >
-                  <Trash2 className="size-4" aria-hidden />
-                </button>
-              </li>
-            ))}
+            {documents.map((doc) => {
+              const extraction = extractions.find((e) => e.documentId === doc.id);
+              const extractable = aiOn && isDocumentExtractable(doc.mimeType);
+              const showExtract = extractable && (!extraction || REEXTRACTABLE_STATUSES.includes(extraction.status));
+              const showReview = extractable && extraction?.status === 'suggested';
+              return (
+                <li key={doc.id} className="flex flex-wrap items-center gap-3 py-3">
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
+                    <FileText className="size-4" aria-hidden />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold">{doc.filename}</p>
+                    <p className="mt-0.5 text-xs text-muted">
+                      {mimeLabel(doc.mimeType)} · {formatBytes(doc.size)} ·{' '}
+                      {doc.source === 'google-drive' ? 'Google Drive' : 'Upload'} · {fmtDate(doc.createdAt.slice(0, 10))}
+                    </p>
+                    {extraction?.status === 'failed' && extraction.error && (
+                      <p className="mt-0.5 text-xs text-danger">{extraction.error}</p>
+                    )}
+                    {extractError?.id === doc.id && <p className="mt-0.5 text-xs text-danger">{extractError.message}</p>}
+                  </div>
+                  <StatusBadge label={STATUS_LABEL[doc.status]} tone={STATUS_TONE[doc.status]} />
+                  {extraction && <StatusBadge label={EXTRACTION_LABEL[extraction.status]} tone={EXTRACTION_TONE[extraction.status]} />}
+                  {showReview && (
+                    <Button variant="subtle" size="sm" onClick={() => setReviewingId(doc.id)}>
+                      Review
+                    </Button>
+                  )}
+                  {showExtract && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      loading={extractingId === doc.id}
+                      disabled={extractingId !== null && extractingId !== doc.id}
+                      onClick={() => void handleExtract(doc)}
+                    >
+                      <Sparkles className="size-3.5" aria-hidden />
+                      {extraction ? 'Re-extract' : 'Extract'}
+                    </Button>
+                  )}
+                  <a
+                    href={api.documentDownloadUrl(doc.id)}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`Download ${doc.filename}`}
+                    className="flex size-9 items-center justify-center rounded-lg text-muted hover:bg-canvas hover:text-ink"
+                  >
+                    <Download className="size-4" aria-hidden />
+                  </a>
+                  <button
+                    type="button"
+                    aria-label={`Delete ${doc.filename}`}
+                    onClick={() => setPendingDelete(doc)}
+                    className="flex size-9 items-center justify-center rounded-lg text-muted hover:bg-danger-soft hover:text-danger"
+                  >
+                    <Trash2 className="size-4" aria-hidden />
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
       </Card>
@@ -267,6 +364,16 @@ export default function Documents() {
           }}
         />
       )}
+
+      {reviewingId &&
+        (() => {
+          const reviewDoc = documents.find((d) => d.id === reviewingId);
+          const reviewExtraction = extractions.find((e) => e.documentId === reviewingId);
+          if (!reviewDoc || !reviewExtraction) return null;
+          return (
+            <ExtractionReviewModal doc={reviewDoc} extraction={reviewExtraction} onClose={() => setReviewingId(null)} />
+          );
+        })()}
     </div>
   );
 }

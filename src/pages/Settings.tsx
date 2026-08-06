@@ -1,16 +1,17 @@
 // Settings page (spec §16) — display currency, net worth setup, managed
 // categories/tags/accounts, automatic detection controls, Drive sync status,
 // and the danger zone.
-import { AlertTriangle, Coins, ExternalLink, FolderSync, Radar, RotateCcw, Wallet } from 'lucide-react';
+import { AlertTriangle, Coins, ExternalLink, FolderSync, Radar, RotateCcw, Sparkles, Wallet } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { fmtCurrency } from '../../shared/format';
+import type { AiProvider } from '../../shared/types';
 import { CurrencySelect } from '../components/CurrencySelect';
 import { ManagedListSection } from '../components/manage/ManagedListSection';
 import { StatusBadge } from '../components/manage/StatusBadge';
 import { useDriveSync } from '../components/manage/useDriveSync';
 import { WipeDataModal } from '../components/manage/WipeDataModal';
 import { useStore } from '../store';
-import { Button, Card, EmptyState, Field, InlineError, Input, Spinner } from '../components/ui';
+import { Button, Card, EmptyState, Field, InlineError, Input, SegmentedControl, Spinner } from '../components/ui';
 
 function formatScheduleTime(time: string): string {
   const [h, m] = time.split(':').map(Number);
@@ -43,6 +44,28 @@ export default function Settings() {
         onSave={async (code) => {
           await updatePreferences({ currency: code });
           toast('success', 'Display currency updated.');
+        }}
+      />
+
+      <AiSection
+        provider={settings.aiProvider}
+        model={settings.aiModel}
+        keySet={settings.aiKeySet}
+        onSaveProvider={async (provider) => {
+          await updatePreferences({ aiProvider: provider });
+          toast('success', 'AI provider updated.');
+        }}
+        onSaveKey={async (key) => {
+          await updatePreferences({ aiApiKey: key });
+          toast('success', 'API key saved.');
+        }}
+        onRemoveKey={async () => {
+          await updatePreferences({ aiApiKey: null });
+          toast('success', 'API key removed.');
+        }}
+        onSaveModel={async (model) => {
+          await updatePreferences({ aiModel: model });
+          toast('success', 'Model override saved.');
         }}
       />
 
@@ -289,6 +312,241 @@ function CurrencySection({
             {pending !== null && <Spinner className="size-4 shrink-0 text-muted" />}
           </div>
           <InlineError message={error} />
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+const AI_PROVIDER_OPTIONS: { value: AiProvider; label: string }[] = [
+  { value: 'off', label: 'Off' },
+  { value: 'workers-ai', label: 'Workers AI' },
+  { value: 'anthropic', label: 'Anthropic (BYOK)' },
+];
+
+const AI_PROVIDER_COPY: Record<AiProvider, string> = {
+  off: 'AI receipt extraction is disabled — no document is ever sent anywhere for analysis.',
+  'workers-ai': 'Runs inside your own Cloudflare account — document bytes never leave your infrastructure.',
+  anthropic:
+    "Sends document images to Anthropic's API under YOUR key. Your key is stored in your database and never displayed again.",
+};
+
+function AiSection({
+  provider,
+  model,
+  keySet,
+  onSaveProvider,
+  onSaveKey,
+  onRemoveKey,
+  onSaveModel,
+}: {
+  provider: AiProvider;
+  model: string | null;
+  keySet: boolean;
+  onSaveProvider: (provider: AiProvider) => Promise<void>;
+  onSaveKey: (key: string) => Promise<void>;
+  onRemoveKey: () => Promise<void>;
+  onSaveModel: (model: string | null) => Promise<void>;
+}) {
+  const [providerPending, setProviderPending] = useState<AiProvider | null>(null);
+  const [providerError, setProviderError] = useState<string | null>(null);
+
+  const [keyInputOpen, setKeyInputOpen] = useState(!keySet);
+  const [keyDraft, setKeyDraft] = useState('');
+  const [keyBusy, setKeyBusy] = useState<'save' | 'remove' | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
+
+  const [modelDraft, setModelDraft] = useState(model ?? '');
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+
+  // Re-open the key input whenever there's no saved key (initial state, or
+  // after a successful Remove) so "add a key" is always reachable.
+  useEffect(() => {
+    if (!keySet) setKeyInputOpen(true);
+  }, [keySet]);
+
+  // Keep the model draft in sync with the saved value (e.g. after a save
+  // elsewhere, or a danger-zone wipe resetting it to null).
+  useEffect(() => {
+    setModelDraft(model ?? '');
+  }, [model]);
+
+  const activeProvider = providerPending ?? provider;
+  const anyBusy = providerPending !== null || keyBusy !== null || modelBusy;
+
+  async function handleProviderChange(next: AiProvider) {
+    if (next === provider || anyBusy) return;
+    setProviderPending(next);
+    setProviderError(null);
+    try {
+      await onSaveProvider(next);
+    } catch (e) {
+      setProviderError(e instanceof Error ? e.message : 'Could not save. Try again.');
+    } finally {
+      setProviderPending(null);
+    }
+  }
+
+  async function handleSaveKey() {
+    if (!keyDraft.trim()) {
+      setKeyError('Enter an API key.');
+      return;
+    }
+    setKeyBusy('save');
+    setKeyError(null);
+    try {
+      await onSaveKey(keyDraft.trim());
+      setKeyDraft('');
+      setKeyInputOpen(false);
+    } catch (e) {
+      setKeyError(e instanceof Error ? e.message : 'Could not save the key. Try again.');
+    } finally {
+      setKeyBusy(null);
+    }
+  }
+
+  async function handleRemoveKey() {
+    setKeyBusy('remove');
+    setKeyError(null);
+    try {
+      await onRemoveKey();
+    } catch (e) {
+      setKeyError(e instanceof Error ? e.message : 'Could not remove the key. Try again.');
+    } finally {
+      setKeyBusy(null);
+    }
+  }
+
+  async function handleSaveModel() {
+    setModelBusy(true);
+    setModelError(null);
+    try {
+      await onSaveModel(modelDraft.trim() || null);
+    } catch (e) {
+      setModelError(e instanceof Error ? e.message : 'Could not save. Try again.');
+    } finally {
+      setModelBusy(false);
+    }
+  }
+
+  return (
+    <Card title="AI receipt extraction">
+      <div className="flex items-start gap-3">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
+          <Sparkles className="size-5" aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1 space-y-4">
+          <p className="text-sm text-muted">
+            Suggests merchant, date, total, and category from a receipt or statement you upload. Ledgerly
+            never creates a transaction automatically — you review and confirm every suggestion.
+          </p>
+
+          <div className={anyBusy ? 'pointer-events-none opacity-60' : ''}>
+            <SegmentedControl
+              ariaLabel="AI provider"
+              options={AI_PROVIDER_OPTIONS}
+              value={activeProvider}
+              onChange={(v) => void handleProviderChange(v)}
+            />
+          </div>
+          {providerPending !== null && (
+            <p className="flex items-center gap-1.5 text-xs text-muted">
+              <Spinner className="size-3.5" /> Saving…
+            </p>
+          )}
+          <InlineError message={providerError} />
+
+          <p className="rounded-xl border border-border bg-canvas px-3 py-2.5 text-xs text-muted">
+            {AI_PROVIDER_COPY[activeProvider]}
+          </p>
+
+          {activeProvider === 'anthropic' && (
+            <div className="space-y-4 border-t border-border pt-4">
+              <Field label="Anthropic API key">
+                {keySet && !keyInputOpen ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusBadge label="Key saved ✓" tone="positive" />
+                    <Button variant="ghost" size="sm" disabled={anyBusy} onClick={() => setKeyInputOpen(true)}>
+                      Replace
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={anyBusy}
+                      loading={keyBusy === 'remove'}
+                      onClick={() => void handleRemoveKey()}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Input
+                      type="password"
+                      autoComplete="off"
+                      value={keyDraft}
+                      disabled={anyBusy}
+                      onChange={(e) => setKeyDraft(e.target.value)}
+                      placeholder="sk-ant-…"
+                      className="max-w-xs"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={anyBusy || !keyDraft.trim()}
+                      loading={keyBusy === 'save'}
+                      onClick={() => void handleSaveKey()}
+                    >
+                      Save key
+                    </Button>
+                    {keySet && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={anyBusy}
+                        onClick={() => {
+                          setKeyInputOpen(false);
+                          setKeyDraft('');
+                          setKeyError(null);
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                  </div>
+                )}
+                <p className="mt-1.5 text-xs text-muted">
+                  Write-only — once saved, the key itself is never shown again.
+                </p>
+              </Field>
+              <InlineError message={keyError} />
+
+              <div>
+                <Field label="Model override (optional)" hint="Leave blank to use the default model.">
+                  <Input
+                    value={modelDraft}
+                    disabled={anyBusy}
+                    onChange={(e) => setModelDraft(e.target.value)}
+                    placeholder="claude-opus-5"
+                    className="max-w-xs"
+                  />
+                </Field>
+                <div className="mt-2 flex justify-end">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={anyBusy || modelDraft.trim() === (model ?? '')}
+                    loading={modelBusy}
+                    onClick={() => void handleSaveModel()}
+                  >
+                    Save model
+                  </Button>
+                </div>
+                <InlineError message={modelError} />
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </Card>
