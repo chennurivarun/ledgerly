@@ -143,6 +143,21 @@ export async function uploadDocuments(env: Env, form: FormData): Promise<UploadR
 }
 
 /**
+ * Only a PDF may ever be served `inline`, and only when the caller actually
+ * asked for it. Every uploaded file's mimeType is client-declared and never
+ * validated against real content (spec: unvalidated MIME storage is safe
+ * exactly because nothing on this origin renders it) — a document stored as
+ * `text/html` or `image/svg+xml` served `inline` would execute script on the
+ * app's own origin (no CSP), with access to every API endpoint including the
+ * ledger. Everything else always downloads as an attachment, regardless of
+ * `?inline=1`.
+ */
+export function resolveDownloadDisposition(mimeType: string, inline: boolean): 'inline' | 'attachment' {
+  const inlineOk = inline && mimeType === 'application/pdf';
+  return inlineOk ? 'inline' : 'attachment';
+}
+
+/**
  * Streams the original bytes back — the R2 key never leaves the server.
  * `inline` renders the file in the browser (e.g. the extraction review
  * modal's PDF preview) instead of triggering a download; everything else
@@ -161,10 +176,13 @@ export async function downloadDocument(env: Env, id: string, opts: { inline?: bo
   if (!object) throw new ApiFail(404, 'The stored copy of that file is no longer available.');
 
   const ascii = safeFilename(row.filename);
-  const disposition = opts.inline ? 'inline' : 'attachment';
+  const disposition = resolveDownloadDisposition(row.mimeType, !!opts.inline);
   const headers = new Headers();
   headers.set('Content-Type', row.mimeType || 'application/octet-stream');
   headers.set('Content-Length', String(object.size));
+  // Belt-and-braces alongside the disposition allowlist above: never let a
+  // browser MIME-sniff a stored file into executable content.
+  headers.set('X-Content-Type-Options', 'nosniff');
   headers.set(
     'Content-Disposition',
     `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(row.filename)}`,

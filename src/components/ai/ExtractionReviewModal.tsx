@@ -3,7 +3,7 @@
 // nothing here is ever silently written. Low-confidence/missing fields are
 // flagged so the eye goes there, but never block confirmation on their own.
 import { AlertTriangle, FileWarning } from 'lucide-react';
-import { useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { api } from '../../api';
 import { fmtDate } from '../../../shared/format';
 import type { DocumentMeta, ExtractedField, ExtractionResult, TxType } from '../../../shared/types';
@@ -57,6 +57,20 @@ export function ExtractionReviewModal({
   const [error, setError] = useState<string | null>(null);
   const [duplicateNotice, setDuplicateNotice] = useState(false);
   const [busy, setBusy] = useState<'confirm' | 'dismiss' | null>(null);
+
+  // The frozen Modal re-runs its focus-trap effect (and steals focus back to
+  // itself) whenever the `onClose` it receives changes identity — so onClose
+  // here must stay referentially stable across re-renders, not just
+  // "correct". A plain `busy ? () => {} : onClose` recreates a function on
+  // every render while busy, and even at rest depends on the caller passing
+  // a stable `onClose` prop. Reading `busy` through a ref lets this callback
+  // never change identity while still guarding against Escape/backdrop close
+  // mid-save (the same behavior WipeDataModal gets from its inline ternary).
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  const guardedClose = useCallback(() => {
+    if (!busyRef.current) onClose();
+  }, [onClose]);
 
   const noAccounts = settings.accounts.length === 0;
   const noCategories = settings.categories.length === 0;
@@ -139,9 +153,9 @@ export function ExtractionReviewModal({
   return (
     <Modal
       title="Review extraction"
-      // Escape-guard while saving (WipeDataModal pattern) — a stray Escape
-      // must not dismiss the dialog mid-request.
-      onClose={busy ? () => {} : onClose}
+      // Escape-guard while saving (WipeDataModal pattern), via a referentially
+      // stable callback — see guardedClose above for why identity matters here.
+      onClose={guardedClose}
       wide
       footer={
         <div className="flex flex-wrap items-center justify-between gap-2">

@@ -1,7 +1,7 @@
 // Documents page (spec §14) — upload + Drive inbox status + vault list.
 // objectKey is never rendered; no encryption claims are made anywhere here.
 import { Download, ExternalLink, FileText, FolderSync, Sparkles, Trash2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fmtDate } from '../../shared/format';
 import {
@@ -133,13 +133,37 @@ export default function Documents() {
   }
 
   // While anything is 'pending', poll for a resolved status instead of
-  // leaving the row stuck on "Extracting…" forever.
+  // leaving the row stuck on "Extracting…" forever — but never while a
+  // review modal is open. A poll-triggered re-render hands the modal a new
+  // set of store-derived props on every tick; without pausing, that used to
+  // change the modal's onClose identity too, which re-ran the (frozen)
+  // Modal's focus effect and yanked focus to its close button mid-edit — a
+  // stray Enter would then discard the draft. Paused here, and belt-and-
+  // braces via the stable closeReview/guarded-onClose below.
   const hasPending = extractions.some((e) => e.status === 'pending');
   useEffect(() => {
-    if (!hasPending) return;
-    const id = setInterval(() => void refreshQuiet(), 5000);
-    return () => clearInterval(id);
-  }, [hasPending, refreshQuiet]);
+    if (!hasPending || reviewingId) return;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    // Re-arm only after the previous refresh settles, so a slow request
+    // can't overlap with the next tick (setTimeout, not setInterval).
+    const tick = () => {
+      void refreshQuiet().finally(() => {
+        if (!cancelled) timeoutId = setTimeout(tick, 5000);
+      });
+    };
+    timeoutId = setTimeout(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [hasPending, reviewingId, refreshQuiet]);
+
+  // Stable identity across re-renders (setReviewingId from useState never
+  // changes) — passed to the modal so its internal onClose guard can also
+  // stay stable, which is what actually stops the focus effect from re-
+  // running on every poll tick or busy transition.
+  const closeReview = useCallback(() => setReviewingId(null), []);
 
   async function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
@@ -328,9 +352,11 @@ export default function Documents() {
             {documents.map((doc) => {
               const extraction = extractions.find((e) => e.documentId === doc.id);
               const mimeOk = isDocumentExtractable(doc.mimeType);
-              // Review just opens an already-fetched suggestion — it doesn't
-              // need a ready provider, only that AI isn't fully off.
-              const showReview = aiOn && mimeOk && extraction?.status === 'suggested';
+              // Review just opens an already-fetched suggestion — it never
+              // calls the provider, so it stays reachable even with AI fully
+              // off (otherwise a 'suggested' extraction from before the user
+              // turned AI off would dangle: a chip with no way to act on it).
+              const showReview = mimeOk && extraction?.status === 'suggested';
               // Starting a NEW extraction needs a ready provider (a key, if anthropic).
               const showExtract =
                 aiReady && mimeOk && (!extraction || REEXTRACTABLE_STATUSES.includes(extraction.status));
@@ -345,8 +371,10 @@ export default function Documents() {
                       {mimeLabel(doc.mimeType)} · {formatBytes(doc.size)} ·{' '}
                       {doc.source === 'google-drive' ? 'Google Drive' : 'Upload'} · {fmtDate(doc.createdAt.slice(0, 10))}
                     </p>
-                    {extraction?.status === 'failed' && extraction.error && (
-                      <p className="mt-0.5 text-xs text-danger">{extraction.error}</p>
+                    {extraction?.status === 'failed' && (
+                      <p className="mt-0.5 text-xs text-danger">
+                        {extraction.error ?? 'Extraction failed — try again.'}
+                      </p>
                     )}
                     {extractError?.id === doc.id && <p className="mt-0.5 text-xs text-danger">{extractError.message}</p>}
                   </div>
@@ -435,7 +463,7 @@ export default function Documents() {
               key={reviewingId}
               doc={reviewDoc}
               extraction={reviewExtraction}
-              onClose={() => setReviewingId(null)}
+              onClose={closeReview}
             />
           );
         })()}
