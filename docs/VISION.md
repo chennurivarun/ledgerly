@@ -60,7 +60,7 @@ ladder (receipt extraction, shipped August 2026):
 
 ## Roadmap
 
-### Phase 1 — Open source (next)
+### Phase 1 — Open source ✅ *(shipped August 2026)*
 
 License: **AGPL-3.0**. Every comparable app with a hosted arm chose it
 (Firefly III, Ghostfolio, Maybe); the one permissive-licensed peer (Actual,
@@ -82,9 +82,9 @@ What the market data says is genuinely sticky is *invisible* AI judged by
 friction reduction — not chat gimmicks (only ~18% of consumers are
 comfortable letting AI make financial decisions autonomously).
 
-1. **Categorization that learns from corrections.** AI fallback where
-   deterministic rules don't match; user corrections get promoted into new
-   rules. The existing rules engine stays authoritative.
+1. **Categorization that learns from corrections.** 🚧 *In progress.* AI
+   fallback where deterministic rules don't match; user corrections get
+   promoted into new rules. The existing rules engine stays authoritative.
 2. **Receipt extraction.** ✅ *Shipped.* The bytes were already in R2; a
    schema-constrained LLM reads one document into a suggested transaction
    (merchant, date, total, category) with per-field confidence, and the user
@@ -93,7 +93,7 @@ comfortable letting AI make financial decisions autonomously).
    default) and **bring-your-own-key** frontier models for maximum accuracy.
    Cents per document or less.
 3. **PDF statement extraction — many transactions from one document.**
-   Receipt extraction handles the one-merchant-one-total shape; a bank or
+   ✅ *Shipped August 2026.* Receipt extraction handles the one-merchant-one-total shape; a bank or
    card statement is a *table* of dozens of rows, so it needs its own
    pipeline: page-aware reading, row-level extraction, and a review screen
    that triages a whole batch at once rather than a single form. CSV
