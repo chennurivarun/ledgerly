@@ -132,7 +132,7 @@ export function ForecastSection() {
                   <p className="text-xs font-medium text-muted">{fmtDate(g.date)}</p>
                   <ul className="divide-y divide-border">
                     {g.occurrences.map((o) => (
-                      <UpcomingRow key={`${o.key}-${o.date}`} occurrence={o} />
+                      <UpcomingRow key={`${o.key}-${o.type}-${o.date}`} occurrence={o} />
                     ))}
                   </ul>
                 </div>
