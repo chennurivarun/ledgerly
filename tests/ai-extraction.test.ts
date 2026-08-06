@@ -17,6 +17,7 @@ import {
   supportsMime,
   WORKERS_AI_DEFAULT_MODEL,
 } from '../worker/ai/providers';
+import { EXTRACTION_IN_FLIGHT_MS, extractionInFlight } from '../worker/extractions';
 
 const CATEGORIES = ['Groceries', 'Dining', 'Needs review', 'Transportation'];
 
@@ -349,5 +350,45 @@ describe('mime support differs by provider', () => {
     expect(canonicalMime('image/jpg')).toBe('image/jpeg');
     expect(supportsMime('workers-ai', 'image/jpg')).toBe(true);
     expect(supportsMime('anthropic', 'application/pdf; version=1.7')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('extractionInFlight — one metered call per document at a time', () => {
+  const NOW = '2026-08-06T12:00:00.000Z';
+
+  function stampedBefore(seconds: number): string {
+    return new Date(Date.parse(NOW) - seconds * 1000).toISOString();
+  }
+
+  it('a fresh pending claim blocks a second run', () => {
+    expect(extractionInFlight('pending', NOW, NOW)).toBe(true);
+    expect(extractionInFlight('pending', stampedBefore(30), NOW)).toBe(true);
+  });
+
+  it('the claim expires at the window edge, so a crashed run frees itself', () => {
+    const windowSeconds = EXTRACTION_IN_FLIGHT_MS / 1000;
+    expect(extractionInFlight('pending', stampedBefore(windowSeconds - 1), NOW)).toBe(true);
+    expect(extractionInFlight('pending', stampedBefore(windowSeconds), NOW)).toBe(false);
+    expect(extractionInFlight('pending', stampedBefore(windowSeconds + 60), NOW)).toBe(false);
+  });
+
+  it('only pending blocks — every settled status re-runs immediately', () => {
+    for (const status of ['suggested', 'failed', 'confirmed', 'dismissed', '']) {
+      expect(extractionInFlight(status, NOW, NOW)).toBe(false);
+    }
+  });
+
+  // Failing open costs one duplicate call; failing closed strands the document.
+  it('a garbled stamp never blocks a retry', () => {
+    for (const bad of ['', '   ', 'not a timestamp', 'yesterday']) {
+      expect(extractionInFlight('pending', bad, NOW)).toBe(false);
+    }
+  });
+
+  it('honours a caller-supplied window', () => {
+    expect(extractionInFlight('pending', stampedBefore(5), NOW, 10_000)).toBe(true);
+    expect(extractionInFlight('pending', stampedBefore(15), NOW, 10_000)).toBe(false);
   });
 });
