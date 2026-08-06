@@ -5,6 +5,7 @@ import {
   type ApiErrorBody,
   type BatchInsertResult,
   type DriveSyncStatus,
+  type ExtractionResult,
   type PatchTxInput,
   type PreferencesResult,
   type PreferencesUpdate,
@@ -81,6 +82,24 @@ export const api = {
     request<{ ok: true }>(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   getDriveSync: () => request<DriveSyncStatus>('/api/drive-sync'),
+
+  /** Run AI extraction on a stored document. Returns the suggestion (never auto-inserts). */
+  extractDocument: (id: string) =>
+    request<ExtractionResult>(`/api/documents/${encodeURIComponent(id)}/extract`, {
+      method: 'POST',
+    }),
+
+  /** Confirm a (possibly user-edited) extraction → creates the transaction. */
+  confirmExtraction: (id: string, input: TxInput) =>
+    request<BatchInsertResult>(
+      `/api/documents/${encodeURIComponent(id)}/extraction/confirm`,
+      { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(input) },
+    ),
+
+  dismissExtraction: (id: string) =>
+    request<{ ok: true }>(`/api/documents/${encodeURIComponent(id)}/extraction/dismiss`, {
+      method: 'POST',
+    }),
 
   wipeAll: () =>
     request<WipeResult>('/api/state', {

@@ -34,6 +34,16 @@ export const SCHEMA_STATEMENTS = [
     value TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS extractions (
+    documentId TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    fields TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    error TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,

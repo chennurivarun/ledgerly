@@ -5,6 +5,7 @@ import {
   defaultSettings,
   type BatchInsertResult,
   type DocumentMeta,
+  type ExtractionResult,
   type PatchTxInput,
   type Period,
   type PreferencesUpdate,
@@ -45,6 +46,7 @@ interface AppStore {
   rules: Rule[];
   settings: Settings;
   documents: DocumentMeta[];
+  extractions: ExtractionResult[];
   activeModal: ModalKind;
   toasts: Toast[];
 
@@ -63,8 +65,19 @@ interface AppStore {
   deleteTransaction(id: string): Promise<void>;
   uploadDocuments(files: File[]): Promise<UploadResult>;
   wipeAll(): Promise<void>;
+  /** Run AI extraction on a document; throws ApiError for inline handling. */
+  extractDocument(id: string): Promise<ExtractionResult>;
+  /** Confirm a (possibly edited) extraction → creates the transaction. */
+  confirmExtraction(id: string, input: TxInput): Promise<BatchInsertResult>;
+  dismissExtraction(id: string): Promise<void>;
   /** Internal: background refresh that never clobbers UI on failure. */
   refreshQuiet(): Promise<void>;
+}
+
+/** Upsert an extraction row by documentId. */
+function upsertExtraction(list: ExtractionResult[], next: ExtractionResult): ExtractionResult[] {
+  const rest = list.filter((e) => e.documentId !== next.documentId);
+  return [...rest, next];
 }
 
 let toastSeq = 1;
@@ -77,6 +90,7 @@ export const useStore = create<AppStore>((set, get) => ({
   rules: [],
   settings: defaultSettings(),
   documents: [],
+  extractions: [],
   activeModal: null,
   toasts: [],
 
@@ -91,6 +105,7 @@ export const useStore = create<AppStore>((set, get) => ({
         rules: s.rules,
         settings: applySettings(s.settings),
         documents: s.documents,
+        extractions: s.extractions ?? [],
       });
     } catch (e) {
       set({ loadError: e instanceof Error ? e.message : 'Failed to load your data.' });
@@ -169,6 +184,33 @@ export const useStore = create<AppStore>((set, get) => ({
     await get().load();
   },
 
+  async extractDocument(id) {
+    const result = await api.extractDocument(id);
+    set((st) => ({ extractions: upsertExtraction(st.extractions, result) }));
+    return result;
+  },
+
+  async confirmExtraction(id, input) {
+    const res = await api.confirmExtraction(id, input);
+    if (res.insertedRows.length > 0) {
+      set((st) => ({
+        transactions: sortTransactions([...st.transactions, ...res.insertedRows]),
+      }));
+    }
+    // Server updates the extraction row + document status; pull fresh state.
+    void get().refreshQuiet();
+    return res;
+  },
+
+  async dismissExtraction(id) {
+    await api.dismissExtraction(id);
+    set((st) => ({
+      extractions: st.extractions.map((e) =>
+        e.documentId === id ? { ...e, status: 'dismissed' as const } : e,
+      ),
+    }));
+  },
+
   async refreshQuiet() {
     try {
       const s = await api.getState();
@@ -178,6 +220,7 @@ export const useStore = create<AppStore>((set, get) => ({
         rules: s.rules,
         settings: applySettings(s.settings),
         documents: s.documents,
+        extractions: s.extractions ?? [],
       });
     } catch {
       /* keep current state */

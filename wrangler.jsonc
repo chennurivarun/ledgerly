@@ -23,5 +23,8 @@
       "bucket_name": "ledgerly-documents"
     }
   ],
+  "ai": {
+    "binding": "AI"
+  },
   "observability": { "enabled": true }
 }

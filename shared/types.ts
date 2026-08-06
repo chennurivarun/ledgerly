@@ -128,7 +128,18 @@ export interface Settings {
   currency: string;
   /** True once the first-run setup wizard was completed or skipped. */
   onboarded: boolean;
+  /** Receipt-extraction AI provider. 'workers-ai' runs inside the user's own
+   * Cloudflare account; 'anthropic' sends document bytes to Anthropic under
+   * the user's own API key (BYOK). */
+  aiProvider: AiProvider;
+  /** Optional model override for the active provider; null = provider default. */
+  aiModel: string | null;
+  /** Whether a BYOK API key is stored. The key itself is write-only — it is
+   * NEVER returned by any endpoint. */
+  aiKeySet: boolean;
 }
+
+export type AiProvider = 'off' | 'workers-ai' | 'anthropic';
 
 // Starter definitions are lookup configuration only — never financial records (spec §3).
 export const STARTER_CATEGORIES = [
@@ -171,6 +182,9 @@ export function defaultSettings(): Settings {
     freshStart: false,
     currency: 'USD',
     onboarded: false,
+    aiProvider: 'off',
+    aiModel: null,
+    aiKeySet: false,
   };
 }
 
@@ -185,6 +199,40 @@ export interface StatePayload {
   rules: Rule[];
   settings: Settings;
   documents: DocumentMeta[]; // newest first, capped at 100
+  /** Extraction rows for the returned documents (absent before first extraction). */
+  extractions?: ExtractionResult[];
+}
+
+// ---------------------------------------------------------------------------
+// AI receipt/document extraction (sprint 3)
+// ---------------------------------------------------------------------------
+
+export type ExtractionStatus = 'pending' | 'suggested' | 'confirmed' | 'dismissed' | 'failed';
+
+/** One extracted field with the model's confidence (0..1). */
+export interface ExtractedField<T> {
+  value: T | null;
+  confidence: number;
+}
+
+/**
+ * The AI's suggestion for a document. NEVER auto-inserted — a transaction is
+ * created only when the user confirms via the review flow (vision principle:
+ * AI suggests, it never silently writes).
+ */
+export interface ExtractionResult {
+  documentId: string;
+  status: ExtractionStatus;
+  merchant: ExtractedField<string>;
+  date: ExtractedField<string>; // YYYY-MM-DD
+  total: ExtractedField<number>; // positive magnitude
+  type: ExtractedField<TxType>;
+  category: ExtractedField<string>; // suggestion from the managed list, or null
+  provider: string;
+  model: string;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** POST /api/transactions — single or batch */
@@ -236,6 +284,10 @@ export interface PreferencesUpdate {
   drive?: DriveSyncMeta;
   currency?: string;
   onboarded?: boolean;
+  aiProvider?: AiProvider;
+  aiModel?: string | null;
+  /** Write-only BYOK key. Stored server-side, never echoed back; null clears it. */
+  aiApiKey?: string | null;
 }
 
 export interface PreferencesResult {
