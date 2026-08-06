@@ -3,6 +3,7 @@
 import { CURRENCY_CODES } from '../shared/currencies';
 import {
   PERIOD_OPTIONS,
+  type AiProvider,
   type Budget,
   type Cadence,
   type DriveSyncMeta,
@@ -11,13 +12,42 @@ import {
   type PreferencesResult,
   type RecurringItem,
   type Rule,
+  type Settings,
+  type Tag,
 } from '../shared/types';
 import { readRules, readTags } from './queries';
-import { readSettings, writeSettings } from './settingsStore';
+import {
+  clearAiApiKey,
+  readSettings,
+  redactAiSecret,
+  writeAiApiKey,
+  writeSettings,
+} from './settingsStore';
 import { ApiFail, isIsoDate, isRecord, normalizeNames, uniqueStrings } from './util';
 
 const PERIODS = new Set<string>(PERIOD_OPTIONS.map((p) => p.value));
 const CADENCES = new Set<string>(['weekly', 'biweekly', 'monthly', 'quarterly', 'annual']);
+const AI_PROVIDERS = new Set<string>(['off', 'workers-ai', 'anthropic']);
+
+/**
+ * What to do with the BYOK key this request. Kept separate from the settings
+ * patch because the key never lives in the `Settings` payload — it is written
+ * to (and deleted from) its own row.
+ */
+type KeyAction = { type: 'set'; value: string } | { type: 'clear' };
+
+/**
+ * The single place a `PreferencesResult` is assembled. Routing every response
+ * through here means the redaction is a property of the endpoint, not of one
+ * lucky call site.
+ */
+export function buildPreferencesResult(
+  settings: Settings,
+  tags: Tag[],
+  rules: Rule[],
+): PreferencesResult {
+  return { ok: true, settings: redactAiSecret(settings), tags, rules };
+}
 
 function names(raw: unknown, label: string): string[] {
   const list = normalizeNames(raw);
@@ -206,11 +236,38 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
   }
   if ('drive' in body) patch.drive = mergeDrive(body.drive, current.drive ?? {});
 
+  if ('aiProvider' in body) {
+    const provider = typeof body.aiProvider === 'string' ? body.aiProvider : '';
+    if (!AI_PROVIDERS.has(provider)) {
+      throw new ApiFail(400, 'aiProvider must be off, workers-ai or anthropic.');
+    }
+    patch.aiProvider = provider as AiProvider;
+  }
+  if ('aiModel' in body) {
+    if (body.aiModel === null) patch.aiModel = null;
+    else if (typeof body.aiModel === 'string') patch.aiModel = body.aiModel.trim() || null;
+    else throw new ApiFail(400, 'aiModel must be a model id, or null for the provider default.');
+  }
+
+  // Write-only: validated here, written after the patch, and never read back
+  // into the response. The value is never quoted in an error message.
+  let keyAction: KeyAction | null = null;
+  if ('aiApiKey' in body) {
+    if (body.aiApiKey === null) keyAction = { type: 'clear' };
+    else if (typeof body.aiApiKey === 'string' && body.aiApiKey.trim()) {
+      keyAction = { type: 'set', value: body.aiApiKey.trim() };
+    } else {
+      throw new ApiFail(400, 'aiApiKey must be a non-empty key, or null to remove the stored key.');
+    }
+  }
+
   // Tags and rules live in their own tables; everything else is a settings row.
   const tagList = 'tags' in body ? names(body.tags, 'tags') : null;
   const ruleList = 'rules' in body ? normalizeRules(body.rules) : null;
 
   await writeSettings(db, patch);
+  if (keyAction?.type === 'set') await writeAiApiKey(db, keyAction.value);
+  else if (keyAction?.type === 'clear') await clearAiApiKey(db);
   if (tagList) await syncTags(db, tagList);
   if (ruleList) await replaceRules(db, ruleList);
 
@@ -219,5 +276,7 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
     readTags(db),
     readRules(db),
   ]);
-  return { ok: true, settings, tags, rules };
+  // `settings.aiKeySet` is derived inside readSettings from the row just
+  // written or deleted, so it is true exactly when a key is stored.
+  return buildPreferencesResult(settings, tags, rules);
 }
