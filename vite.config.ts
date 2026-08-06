@@ -16,5 +16,7 @@ export default defineConfig(({ mode }) => {
   const remoteBindings = env.LEDGERLY_REMOTE_BINDINGS === 'true';
   return {
     plugins: [react(), tailwindcss(), cloudflare({ remoteBindings })],
+    // Honor an externally assigned port (tooling sets PORT); default stays 5173.
+    server: { port: Number(process.env.PORT) || 5173 },
   };
 });
