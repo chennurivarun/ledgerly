@@ -89,6 +89,12 @@ describe('mergeStatements', () => {
     expect(merged[0].rows).toEqual([]);
   });
 
+  it('drops a local statement entirely absent from incoming (e.g. its document was deleted server-side)', () => {
+    const local = [statement({ rows: fakeRows(2), rowCount: 2 })];
+    const merged = mergeStatements(local, []);
+    expect(merged).toEqual([]);
+  });
+
   it('merges multiple statements independently in one call', () => {
     const local = [
       statement({ documentId: 'doc-1', rows: fakeRows(2, 'doc-1'), rowCount: 2 }),

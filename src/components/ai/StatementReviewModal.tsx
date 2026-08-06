@@ -125,12 +125,31 @@ export function StatementReviewModal({
     if (!confirmingDismissAll) return;
     const onKeyCapture = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // A dismiss actually in flight must not read as cancelled: let the
+        // request finish (and the frozen Modal's own bubble-phase handler
+        // no-op via guardedClose's busy check) instead of hiding the strip
+        // out from under it.
+        if (busyRef.current) return;
         e.stopPropagation();
         setConfirmingDismissAll(false);
       }
     };
     document.addEventListener('keydown', onKeyCapture, { capture: true });
     return () => document.removeEventListener('keydown', onKeyCapture, { capture: true });
+  }, [confirmingDismissAll]);
+
+  // The strip isn't a separate Modal, so nothing else moves focus into it
+  // when it appears: without this, focus stays on the (now unmounted)
+  // "Dismiss all" button, drops to body, and Tab can walk out to the page
+  // behind the review modal (Shift+Tab would land on the destructive
+  // "Dismiss" button first). Focus the strip's first button instead — which
+  // must be "Keep" in DOM order (see the JSX below) so the safe,
+  // non-destructive action is what a stray Enter/Space would trigger.
+  const stripRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (confirmingDismissAll) {
+      stripRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    }
   }, [confirmingDismissAll]);
 
   // Stable across renders (functional setState — doesn't close over `drafts`)
@@ -253,8 +272,12 @@ export function StatementReviewModal({
           // would unlock body scroll on its own cancel and double up
           // aria-modal against the review modal underneath it). Escape is
           // handled separately above; this is just the visible affordance.
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm font-medium text-danger">
+          // ref + role="alert": see the focus-management effect above — the
+          // "Dismiss all" button this strip replaces just unmounted, so
+          // something has to move focus in, and the prompt needs to be
+          // announced the same moment it takes focus.
+          <div ref={stripRef} className="flex flex-wrap items-center justify-between gap-2">
+            <p role="alert" className="text-sm font-medium text-danger">
               Dismiss all {pendingRows.length} remaining row{pendingRows.length === 1 ? '' : 's'}? This can&apos;t be
               undone.
             </p>

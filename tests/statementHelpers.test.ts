@@ -309,9 +309,12 @@ describe('filterBySnapshot', () => {
     expect(filterBySnapshot(rows, new Set(['b'])).map((r) => r.id)).toEqual(['b']);
   });
 
-  it('returns every row unfiltered when snapshot is null (no filter active)', () => {
+  it('returns the SAME array reference when snapshot is null (no filter active)', () => {
     const rows = [row({ id: 'a' }), row({ id: 'b' })];
-    expect(filterBySnapshot(rows, null)).toEqual(rows);
+    // Identity, not just equality, is load-bearing here: the modal's
+    // visibleRows === pendingRows when no filter is active depends on this
+    // function not allocating a new array in the unfiltered case.
+    expect(filterBySnapshot(rows, null)).toBe(rows);
   });
 
   it('returns nothing for an empty snapshot', () => {
