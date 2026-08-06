@@ -142,8 +142,29 @@ export async function uploadDocuments(env: Env, form: FormData): Promise<UploadR
   return { documents, inserted, duplicates, review, errors };
 }
 
-/** Streams the original bytes back — the R2 key never leaves the server. */
-export async function downloadDocument(env: Env, id: string): Promise<Response> {
+/**
+ * Only a PDF may ever be served `inline`, and only when the caller actually
+ * asked for it. Every uploaded file's mimeType is client-declared and never
+ * validated against real content (spec: unvalidated MIME storage is safe
+ * exactly because nothing on this origin renders it) — a document stored as
+ * `text/html` or `image/svg+xml` served `inline` would execute script on the
+ * app's own origin (no CSP), with access to every API endpoint including the
+ * ledger. Everything else always downloads as an attachment, regardless of
+ * `?inline=1`.
+ */
+export function resolveDownloadDisposition(mimeType: string, inline: boolean): 'inline' | 'attachment' {
+  const inlineOk = inline && mimeType === 'application/pdf';
+  return inlineOk ? 'inline' : 'attachment';
+}
+
+/**
+ * Streams the original bytes back — the R2 key never leaves the server.
+ * `inline` renders the file in the browser (e.g. the extraction review
+ * modal's PDF preview) instead of triggering a download; everything else
+ * about the response is unchanged. Default stays `attachment` so a plain
+ * link/tab-open still downloads as before.
+ */
+export async function downloadDocument(env: Env, id: string, opts: { inline?: boolean } = {}): Promise<Response> {
   const row = await env.DB.prepare(
     'SELECT filename, mimeType, objectKey FROM documents WHERE id = ?',
   )
@@ -155,12 +176,16 @@ export async function downloadDocument(env: Env, id: string): Promise<Response> 
   if (!object) throw new ApiFail(404, 'The stored copy of that file is no longer available.');
 
   const ascii = safeFilename(row.filename);
+  const disposition = resolveDownloadDisposition(row.mimeType, !!opts.inline);
   const headers = new Headers();
   headers.set('Content-Type', row.mimeType || 'application/octet-stream');
   headers.set('Content-Length', String(object.size));
+  // Belt-and-braces alongside the disposition allowlist above: never let a
+  // browser MIME-sniff a stored file into executable content.
+  headers.set('X-Content-Type-Options', 'nosniff');
   headers.set(
     'Content-Disposition',
-    `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
+    `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
   );
   headers.set('Cache-Control', 'private, no-store');
   return new Response(object.body, { headers });

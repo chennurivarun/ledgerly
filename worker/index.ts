@@ -218,7 +218,9 @@ app.post('/api/documents', async (c) => {
   return c.json(await uploadDocuments(c.env, form));
 });
 
-app.get('/api/documents/:id/download', async (c) => downloadDocument(c.env, c.req.param('id')));
+app.get('/api/documents/:id/download', async (c) =>
+  downloadDocument(c.env, c.req.param('id'), { inline: c.req.query('inline') === '1' }),
+);
 
 app.delete('/api/documents/:id', async (c) => {
   await deleteDocument(c.env, c.req.param('id'));
