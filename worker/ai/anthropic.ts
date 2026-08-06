@@ -15,7 +15,7 @@ import { canonicalMime, toBase64 } from './providers';
  */
 const MAX_TOKENS = 4096;
 
-function documentBlock(mimeType: string, data: string): Anthropic.ContentBlockParam {
+export function documentBlock(mimeType: string, data: string): Anthropic.ContentBlockParam {
   const mime = canonicalMime(mimeType);
   if (mime === 'application/pdf') {
     return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data } };
@@ -30,9 +30,10 @@ function documentBlock(mimeType: string, data: string): Anthropic.ContentBlockPa
 /**
  * Map SDK failures onto something a user can act on. The original message is
  * deliberately dropped: it can carry request fragments, and an auth failure's
- * body is the last place we want near a log line (spec §20).
+ * body is the last place we want near a log line (spec §20). Shared with the
+ * statement pipeline so both paths fail in the same words.
  */
-function readableError(err: unknown): Error {
+export function readableError(err: unknown): Error {
   if (err instanceof Anthropic.AuthenticationError) {
     return new Error('Anthropic rejected the API key. Check the key saved in Settings.');
   }

@@ -83,6 +83,49 @@ export function assertMimeSupported(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Statement extraction (sprint 4) is narrower than receipt extraction: PDFs
+// only, Anthropic only. Both limits are stated to the user in the words that
+// explain them, because "unsupported" with no reason is a dead end.
+// ---------------------------------------------------------------------------
+
+export const WORKERS_AI_NO_PDF =
+  "Reading PDF statements needs the Anthropic provider — Workers AI models can't read PDFs yet.";
+
+/**
+ * ponytail: v1 is BYOK-only. The privacy-first default cannot do the job at
+ * all here (providers.ts has refused PDFs to Workers AI since sprint 3), so
+ * rather than pretend, the endpoint names the provider and the reason.
+ */
+export function selectStatementProvider(settings: Settings): ProviderChoice {
+  if (settings.aiProvider === 'workers-ai') throw new ApiFail(400, WORKERS_AI_NO_PDF);
+  // 'off' and a missing key are the same configuration problems as receipt
+  // extraction, and get the same messages.
+  const choice = selectProvider(settings);
+  if (choice.provider !== 'anthropic') throw new ApiFail(400, WORKERS_AI_NO_PDF);
+  return choice;
+}
+
+/**
+ * PDFs only. A CSV is pointed at the deterministic importer rather than at a
+ * model: that path reads every row exactly and costs nothing, so sending it
+ * here would be a worse answer at a higher price (VISION.md phase 2 item 3).
+ */
+export function assertStatementMime(mimeType: string): void {
+  const mime = canonicalMime(mimeType);
+  if (mime === 'application/pdf') return;
+  if (mime === 'text/csv' || mime === 'application/csv') {
+    throw new ApiFail(
+      400,
+      'Import CSV statements from the Transactions page — that reads every row exactly, with no model involved.',
+    );
+  }
+  throw new ApiFail(
+    400,
+    'Statement extraction reads PDF statements. Upload the PDF your bank issued, or import a CSV from the Transactions page.',
+  );
+}
+
 /** Base64 for the request body, chunked so a 20 MB file cannot blow the stack. */
 export function toBase64(bytes: ArrayBuffer): string {
   const view = new Uint8Array(bytes);

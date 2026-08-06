@@ -127,8 +127,12 @@ function isUniqueViolation(err: unknown): boolean {
   return /unique constraint/i.test(message);
 }
 
-/** Fingerprints of `candidates` that already exist, looked up in small chunks. */
-async function existingFingerprints(
+/**
+ * Fingerprints of `candidates` that already exist, looked up in small chunks.
+ * Exported for the statement pipeline's duplicate pre-flagging, which asks the
+ * same question before the user commits to anything.
+ */
+export async function existingFingerprints(
   db: D1Database,
   candidates: string[],
 ): Promise<Set<string>> {

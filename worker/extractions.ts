@@ -43,7 +43,7 @@ interface ExtractionRow {
   updatedAt: string;
 }
 
-interface DocRow {
+export interface DocRow {
   id: string;
   mimeType: string;
   objectKey: string;
@@ -105,7 +105,8 @@ export async function readExtractions(
   return out;
 }
 
-async function readDocumentRow(db: D1Database, id: string): Promise<DocRow> {
+/** Shared with the statement pipeline — same 404, same words. */
+export async function readDocumentRow(db: D1Database, id: string): Promise<DocRow> {
   const row = await db
     .prepare('SELECT id, mimeType, objectKey, size FROM documents WHERE id = ?')
     .bind(id)
