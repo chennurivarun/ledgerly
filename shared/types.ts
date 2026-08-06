@@ -201,6 +201,8 @@ export interface StatePayload {
   documents: DocumentMeta[]; // newest first, capped at 100
   /** Extraction rows for the returned documents (absent before first extraction). */
   extractions?: ExtractionResult[];
+  /** Statement jobs (with rows) for the returned documents. */
+  statements?: StatementExtraction[];
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +210,9 @@ export interface StatePayload {
 // ---------------------------------------------------------------------------
 
 export type ExtractionStatus = 'pending' | 'suggested' | 'confirmed' | 'dismissed' | 'failed';
+
+/** Hard cap on rows proposed from one statement run (spec: no silent truncation). */
+export const MAX_STATEMENT_ROWS = 300;
 
 /** One extracted field with the model's confidence (0..1). */
 export interface ExtractedField<T> {
@@ -233,6 +238,62 @@ export interface ExtractionResult {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// PDF statement extraction (sprint 4) — many transactions from one document
+// ---------------------------------------------------------------------------
+
+export type StatementJobStatus =
+  | 'pending'
+  | 'suggested' // rows proposed, awaiting review
+  | 'partial' // rows proposed but the run hit the cap / ran out of room
+  | 'confirmed' // every row triaged (confirmed or dismissed)
+  | 'dismissed'
+  | 'failed';
+
+export type StatementRowStatus = 'proposed' | 'confirmed' | 'dismissed';
+
+/**
+ * One proposed transaction read off a statement. Same never-guess rules as
+ * receipt extraction: a field the model could not read is null with
+ * confidence 0, and NOTHING here becomes a transaction until the user
+ * confirms the row.
+ */
+export interface StatementRow {
+  id: string;
+  documentId: string;
+  index: number; // order as read off the statement
+  date: ExtractedField<string>; // YYYY-MM-DD
+  merchant: ExtractedField<string>;
+  amount: ExtractedField<number>; // positive magnitude
+  type: ExtractedField<TxType>;
+  category: ExtractedField<string>; // from the managed list, or null
+  status: StatementRowStatus;
+  /** Server-computed: this row's fingerprint already exists in transactions. */
+  duplicate: boolean;
+  /** Lowest field confidence — drives review ordering. */
+  lowestConfidence: number;
+}
+
+export interface StatementExtraction {
+  documentId: string;
+  status: StatementJobStatus;
+  rowCount: number;
+  /** True when the run stopped at MAX_STATEMENT_ROWS or ran out of output room. */
+  truncated: boolean;
+  provider: string;
+  model: string;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  rows: StatementRow[];
+}
+
+/** POST /api/documents/:id/statement/confirm — user-reviewed rows only. */
+export interface StatementConfirmInput {
+  /** Each entry is a (possibly edited) row the user chose to import. */
+  rows: (TxInput & { rowId: string })[];
 }
 
 /** POST /api/transactions — single or batch */

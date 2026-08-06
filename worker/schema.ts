@@ -44,6 +44,28 @@ export const SCHEMA_STATEMENTS = [
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS statement_extractions (
+    documentId TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    rowCount INTEGER NOT NULL DEFAULT 0,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    error TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS statement_rows (
+    id TEXT PRIMARY KEY,
+    documentId TEXT NOT NULL,
+    idx INTEGER NOT NULL,
+    fields TEXT NOT NULL,
+    status TEXT NOT NULL,
+    duplicate INTEGER NOT NULL DEFAULT 0,
+    lowestConfidence REAL NOT NULL DEFAULT 0,
+    createdAt TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_statement_rows_doc ON statement_rows(documentId, idx)`,
   `CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,

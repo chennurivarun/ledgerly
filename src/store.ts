@@ -11,6 +11,8 @@ import {
   type PreferencesUpdate,
   type Rule,
   type Settings,
+  type StatementConfirmInput,
+  type StatementExtraction,
   type Tag,
   type Transaction,
   type TxInput,
@@ -47,6 +49,7 @@ interface AppStore {
   settings: Settings;
   documents: DocumentMeta[];
   extractions: ExtractionResult[];
+  statements: StatementExtraction[];
   activeModal: ModalKind;
   toasts: Toast[];
 
@@ -70,6 +73,11 @@ interface AppStore {
   /** Confirm a (possibly edited) extraction → creates the transaction. */
   confirmExtraction(id: string, input: TxInput): Promise<BatchInsertResult>;
   dismissExtraction(id: string): Promise<void>;
+  /** Read a PDF statement into proposed rows; inserts nothing. */
+  extractStatement(id: string): Promise<StatementExtraction>;
+  /** Import the user-selected (possibly edited) rows. */
+  confirmStatementRows(id: string, input: StatementConfirmInput): Promise<BatchInsertResult>;
+  dismissStatement(id: string): Promise<void>;
   /** Internal: background refresh that never clobbers UI on failure. */
   refreshQuiet(): Promise<void>;
 }
@@ -91,6 +99,7 @@ export const useStore = create<AppStore>((set, get) => ({
   settings: defaultSettings(),
   documents: [],
   extractions: [],
+  statements: [],
   activeModal: null,
   toasts: [],
 
@@ -106,6 +115,7 @@ export const useStore = create<AppStore>((set, get) => ({
         settings: applySettings(s.settings),
         documents: s.documents,
         extractions: s.extractions ?? [],
+        statements: s.statements ?? [],
       });
     } catch (e) {
       set({ loadError: e instanceof Error ? e.message : 'Failed to load your data.' });
@@ -211,6 +221,35 @@ export const useStore = create<AppStore>((set, get) => ({
     }));
   },
 
+  async extractStatement(id) {
+    const result = await api.extractStatement(id);
+    set((st) => ({
+      statements: [...st.statements.filter((x) => x.documentId !== id), result],
+    }));
+    return result;
+  },
+
+  async confirmStatementRows(id, input) {
+    const res = await api.confirmStatementRows(id, input);
+    if (res.insertedRows.length > 0) {
+      set((st) => ({
+        transactions: sortTransactions([...st.transactions, ...res.insertedRows]),
+      }));
+    }
+    // Server flips row + job status; pull fresh state rather than guessing it.
+    void get().refreshQuiet();
+    return res;
+  },
+
+  async dismissStatement(id) {
+    await api.dismissStatement(id);
+    set((st) => ({
+      statements: st.statements.map((x) =>
+        x.documentId === id ? { ...x, status: 'dismissed' as const } : x,
+      ),
+    }));
+  },
+
   async refreshQuiet() {
     try {
       const s = await api.getState();
@@ -221,6 +260,7 @@ export const useStore = create<AppStore>((set, get) => ({
         settings: applySettings(s.settings),
         documents: s.documents,
         extractions: s.extractions ?? [],
+        statements: s.statements ?? [],
       });
     } catch {
       /* keep current state */

@@ -9,6 +9,8 @@ import {
   type PatchTxInput,
   type PreferencesResult,
   type PreferencesUpdate,
+  type StatementConfirmInput,
+  type StatementExtraction,
   type StatePayload,
   type Transaction,
   type TxInput,
@@ -98,6 +100,25 @@ export const api = {
 
   dismissExtraction: (id: string) =>
     request<{ ok: true }>(`/api/documents/${encodeURIComponent(id)}/extraction/dismiss`, {
+      method: 'POST',
+    }),
+
+  /** Read a PDF statement into many proposed rows. Inserts nothing. */
+  extractStatement: (id: string) =>
+    request<StatementExtraction>(
+      `/api/documents/${encodeURIComponent(id)}/statement/extract`,
+      { method: 'POST' },
+    ),
+
+  /** Import the rows the user selected (and possibly edited). */
+  confirmStatementRows: (id: string, input: StatementConfirmInput) =>
+    request<BatchInsertResult>(
+      `/api/documents/${encodeURIComponent(id)}/statement/confirm`,
+      { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(input) },
+    ),
+
+  dismissStatement: (id: string) =>
+    request<{ ok: true }>(`/api/documents/${encodeURIComponent(id)}/statement/dismiss`, {
       method: 'POST',
     }),
 
