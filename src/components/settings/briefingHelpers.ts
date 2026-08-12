@@ -3,25 +3,10 @@
 // rendering the page (same split as manage/ruleSuggestionHelpers.ts).
 import type { BriefingCadence, PreferencesUpdate, Settings } from '../../../shared/types';
 
-/**
- * The S7-0 contract (323dab4) froze the briefing fields on `Settings` but the
- * matching PUT /api/preferences fields are S7-1's plumbing, landing in a
- * parallel worktree — and shared/* is frozen for BOTH tasks. The wire fields
- * are therefore typed here as a local extension, with names confirmed
- * against S7-1's worker whitelist (the token field is `briefingWhatsappToken`,
- * write-only like `aiApiKey`). FOR THE EM AT INTEGRATION: land these five
- * optional fields on PreferencesUpdate in shared/types.ts, then this
- * interface collapses into it with no call-site changes.
- */
-export interface BriefingSettingsUpdate extends PreferencesUpdate {
-  briefingsEnabled?: boolean;
-  briefingCadence?: BriefingCadence;
-  briefingWhatsappRecipient?: string;
-  briefingWhatsappPhoneNumberId?: string;
-  /** Write-only Cloud API access token. Stored server-side, never echoed
-   * back; null clears it (exactly the aiApiKey semantics). */
-  briefingWhatsappToken?: string | null;
-}
+/** The briefing wire fields now live on PreferencesUpdate itself
+ * (integration fixup after the S7 parallel builds); the alias remains so
+ * call sites read as what they are. */
+export type BriefingSettingsUpdate = PreferencesUpdate;
 
 /** Recipient numbers are E.164 digits only — strip everything else so a
  * pasted "+1 (555) 123-4567" becomes "15551234567". */

@@ -399,6 +399,14 @@ export interface PreferencesUpdate {
   aiModel?: string | null;
   /** Write-only BYOK key. Stored server-side, never echoed back; null clears it. */
   aiApiKey?: string | null;
+  briefingsEnabled?: boolean;
+  briefingCadence?: BriefingCadence;
+  /** E.164 digits without '+', or '' to clear. */
+  briefingWhatsappRecipient?: string;
+  briefingWhatsappPhoneNumberId?: string;
+  /** Write-only Cloud API access token. Stored server-side, never echoed
+   * back; null clears it (exactly the aiApiKey semantics). */
+  briefingWhatsappToken?: string | null;
 }
 
 export interface PreferencesResult {
