@@ -21,17 +21,19 @@ import { readRules, readTags } from './queries';
 import {
   clearAiApiKey,
   clearBriefingWhatsappToken,
+  clearSarvamApiKey,
   readSettings,
   redactAiSecret,
   writeAiApiKey,
   writeBriefingWhatsappToken,
+  writeSarvamApiKey,
   writeSettings,
 } from './settingsStore';
 import { ApiFail, isIsoDate, isRecord, normalizeNames, uniqueStrings } from './util';
 
 const PERIODS = new Set<string>(PERIOD_OPTIONS.map((p) => p.value));
 const CADENCES = new Set<string>(['weekly', 'biweekly', 'monthly', 'quarterly', 'annual']);
-const AI_PROVIDERS = new Set<string>(['off', 'workers-ai', 'anthropic']);
+const AI_PROVIDERS = new Set<string>(['off', 'workers-ai', 'anthropic', 'sarvam']);
 const BRIEFING_CADENCES = new Set<string>(['daily', 'weekly']);
 
 /**
@@ -65,6 +67,33 @@ export function normalizeBriefingPhoneNumberId(raw: unknown): string {
  * to (and deleted from) its own row.
  */
 type KeyAction = { type: 'set'; value: string } | { type: 'clear' };
+
+/**
+ * Display-only ceiling on the user-entered Sarvam per-page rate. The value is
+ * never charged by us — it only feeds the preflight estimate — so validation
+ * is about catching typos (a negative rate, a fat-fingered 1e9), not billing.
+ */
+export const MAX_SARVAM_PRICE_PER_PAGE = 10000;
+
+/**
+ * The user's own per-page price off dashboard.sarvam.ai, or null to show no
+ * estimate at all — a guessed price would be a made-up number wearing a
+ * currency sign. Exported pure so the validation decisions are testable
+ * without a DB.
+ */
+export function normalizeSarvamPrice(raw: unknown): number | null {
+  if (raw === null) return null;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw.trim()) : NaN;
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_SARVAM_PRICE_PER_PAGE) {
+    throw new ApiFail(
+      400,
+      `sarvamPricePerPage must be a positive number up to ${MAX_SARVAM_PRICE_PER_PAGE}, or null to show no estimate.`,
+    );
+  }
+  // Not rounded to cents: per-page rates are legitimately sub-cent (₹0.015);
+  // the preflight rounds the final pages × price estimate instead.
+  return n;
+}
 
 /**
  * The single place a `PreferencesResult` is assembled. Routing every response
@@ -269,7 +298,7 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
   if ('aiProvider' in body) {
     const provider = typeof body.aiProvider === 'string' ? body.aiProvider : '';
     if (!AI_PROVIDERS.has(provider)) {
-      throw new ApiFail(400, 'aiProvider must be off, workers-ai or anthropic.');
+      throw new ApiFail(400, 'aiProvider must be off, workers-ai, anthropic or sarvam.');
     }
     patch.aiProvider = provider as AiProvider;
   }
@@ -289,6 +318,22 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
     } else {
       throw new ApiFail(400, 'aiApiKey must be a non-empty key, or null to remove the stored key.');
     }
+  }
+
+  // The Sarvam key mirrors aiApiKey exactly: write-only, own row, never
+  // echoed, never quoted in an error message. `sarvamKeySet` is derived in
+  // readSettings and simply ignored if a client echoes it back.
+  let sarvamKeyAction: KeyAction | null = null;
+  if ('sarvamApiKey' in body) {
+    if (body.sarvamApiKey === null) sarvamKeyAction = { type: 'clear' };
+    else if (typeof body.sarvamApiKey === 'string' && body.sarvamApiKey.trim()) {
+      sarvamKeyAction = { type: 'set', value: body.sarvamApiKey.trim() };
+    } else {
+      throw new ApiFail(400, 'sarvamApiKey must be a non-empty key, or null to remove the stored key.');
+    }
+  }
+  if ('sarvamPricePerPage' in body) {
+    patch.sarvamPricePerPage = normalizeSarvamPrice(body.sarvamPricePerPage);
   }
 
   // Proactive briefings (sprint 7). `briefingWhatsappTokenSet` is derived in
@@ -355,6 +400,8 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
   await writeSettings(db, patch);
   if (keyAction?.type === 'set') await writeAiApiKey(db, keyAction.value);
   else if (keyAction?.type === 'clear') await clearAiApiKey(db);
+  if (sarvamKeyAction?.type === 'set') await writeSarvamApiKey(db, sarvamKeyAction.value);
+  else if (sarvamKeyAction?.type === 'clear') await clearSarvamApiKey(db);
   if (briefingTokenAction?.type === 'set') {
     await writeBriefingWhatsappToken(db, briefingTokenAction.value);
   } else if (briefingTokenAction?.type === 'clear') {

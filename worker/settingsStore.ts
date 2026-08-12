@@ -23,8 +23,16 @@ export const AI_KEY_SECRET_KEY = 'aiApiKeySecret';
  */
 export const BRIEFING_TOKEN_SECRET_KEY = 'briefingWhatsappTokenSecret';
 
+/**
+ * Where the Sarvam API key is stored. Same containment as the BYOK key
+ * above: NOT a `defaultSettings()` key, so `readSettings` can never copy it
+ * into a payload; `Settings.sarvamKeySet` is derived from its presence
+ * instead.
+ */
+export const SARVAM_KEY_SECRET_KEY = 'sarvamApiKeySecret';
+
 /** Every write-only settings row. Grows here, and ONLY here, per secret. */
-const SECRET_KEYS = [AI_KEY_SECRET_KEY, BRIEFING_TOKEN_SECRET_KEY] as const;
+const SECRET_KEYS = [AI_KEY_SECRET_KEY, BRIEFING_TOKEN_SECRET_KEY, SARVAM_KEY_SECRET_KEY] as const;
 
 interface SettingRow {
   key: string;
@@ -32,10 +40,18 @@ interface SettingRow {
 }
 
 /**
+ * Settings keys whose value is `number | null`. Their default (null) hides
+ * the numeric half from the generic fallback check below, so they are named
+ * here instead of silently degrading every stored number to null.
+ */
+const NULLABLE_NUMBER_KEYS = new Set(['sarvamPricePerPage']);
+
+/**
  * A stored value only replaces its default when it still has the expected
  * shape — a corrupt row degrades to the default instead of breaking the UI.
  */
-function shapeOk(value: unknown, fallback: unknown): boolean {
+function shapeOk(key: string, value: unknown, fallback: unknown): boolean {
+  if (NULLABLE_NUMBER_KEYS.has(key)) return value === null || typeof value === 'number';
   if (Array.isArray(fallback)) return Array.isArray(value);
   if (fallback === null) return value === null || typeof value === 'string'; // driveResetAt
   if (typeof fallback === 'object') {
@@ -62,6 +78,7 @@ export async function readSettings(db: D1Database): Promise<Settings> {
   const out = defaultSettings() as unknown as Record<string, unknown>;
   let keyStored = false;
   let briefingTokenStored = false;
+  let sarvamKeyStored = false;
   for (const row of results ?? []) {
     // Secrets are the rows we read but never copy: only the boolean
     // "is there one" escapes this loop.
@@ -73,6 +90,10 @@ export async function readSettings(db: D1Database): Promise<Settings> {
       briefingTokenStored = decodeSecret(row.value) !== null;
       continue;
     }
+    if (row.key === SARVAM_KEY_SECRET_KEY) {
+      sarvamKeyStored = decodeSecret(row.value) !== null;
+      continue;
+    }
     if (!(row.key in out)) continue; // internal keys stay out of the client payload
     let parsed: unknown;
     try {
@@ -80,13 +101,14 @@ export async function readSettings(db: D1Database): Promise<Settings> {
     } catch {
       continue;
     }
-    if (shapeOk(parsed, out[row.key])) out[row.key] = parsed;
+    if (shapeOk(row.key, parsed, out[row.key])) out[row.key] = parsed;
   }
-  // Always derived, never read from their own rows — a stored `aiKeySet` or
-  // `briefingWhatsappTokenSet` could drift out of step with the actual
-  // secret, and these flags gate the UI's "saved" state.
+  // Always derived, never read from their own rows — a stored `aiKeySet`,
+  // `briefingWhatsappTokenSet` or `sarvamKeySet` could drift out of step with
+  // the actual secret, and these flags gate the UI's "saved" state.
   out.aiKeySet = keyStored;
   out.briefingWhatsappTokenSet = briefingTokenStored;
+  out.sarvamKeySet = sarvamKeyStored;
   return out as unknown as Settings;
 }
 
@@ -137,6 +159,20 @@ export async function writeBriefingWhatsappToken(db: D1Database, token: string):
 /** Removing the row is what makes `briefingWhatsappTokenSet` false again. */
 export async function clearBriefingWhatsappToken(db: D1Database): Promise<void> {
   await db.prepare('DELETE FROM settings WHERE key = ?').bind(BRIEFING_TOKEN_SECRET_KEY).run();
+}
+
+/** The plaintext Sarvam key, or null when none is stored. Never leaves the worker. */
+export async function readSarvamApiKey(db: D1Database): Promise<string | null> {
+  return readSecret(db, SARVAM_KEY_SECRET_KEY);
+}
+
+export async function writeSarvamApiKey(db: D1Database, key: string): Promise<void> {
+  await writeSettings(db, { [SARVAM_KEY_SECRET_KEY]: key });
+}
+
+/** Removing the row is what makes `sarvamKeySet` false again. */
+export async function clearSarvamApiKey(db: D1Database): Promise<void> {
+  await db.prepare('DELETE FROM settings WHERE key = ?').bind(SARVAM_KEY_SECRET_KEY).run();
 }
 
 /** Upsert only the given keys — unrelated settings are never touched (spec §4.5). */

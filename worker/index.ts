@@ -40,6 +40,7 @@ import {
   dismissStatement,
   readStatements,
   runStatementExtraction,
+  statementPreflight,
 } from './statements';
 import {
   buildSuggestionRuleText,
@@ -362,6 +363,12 @@ app.post('/api/documents/:id/extraction/dismiss', async (c) => {
 // one document — /statement/extract never writes a transaction; /confirm is the
 // only path that does, and only for the rows the user selected.
 // ---------------------------------------------------------------------------
+
+// Free and side-effect-free: pages, batch count and an honest cost estimate
+// BEFORE the user commits to a metered run. Same gates as /extract.
+app.get('/api/documents/:id/statement/preflight', async (c) =>
+  c.json(await statementPreflight(c.env, c.req.param('id'))),
+);
 
 app.post('/api/documents/:id/statement/extract', async (c) =>
   c.json(await runStatementExtraction(c.env, c.req.param('id'))),
