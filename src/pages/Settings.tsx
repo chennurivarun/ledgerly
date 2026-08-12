@@ -404,6 +404,8 @@ const AI_PROVIDER_OPTIONS: { value: AiProvider; label: string }[] = [
 
 const AI_PROVIDER_COPY: Record<AiProvider, string> = {
   off: 'AI receipt extraction is disabled — no document is ever sent anywhere for analysis.',
+  sarvam:
+    "Sends documents to Sarvam's Document AI under YOUR key — built for Indian documents (22 Indic languages + English). Your key is stored in your database and never displayed again.",
   'workers-ai':
     'Processed by Workers AI inside your own Cloudflare account — never sent to a third-party vendor.',
   anthropic:
@@ -413,9 +415,10 @@ const AI_PROVIDER_COPY: Record<AiProvider, string> = {
 // Model override is shown for any active provider except 'off' — placeholder
 // reflects what that provider actually calls its models, so it never reads
 // like Anthropic naming while Workers AI is selected.
-const MODEL_PLACEHOLDER: Record<'workers-ai' | 'anthropic', string> = {
+const MODEL_PLACEHOLDER: Record<'workers-ai' | 'anthropic' | 'sarvam', string> = {
   'workers-ai': '@cf/meta/llama-3.1-8b-instruct',
   anthropic: 'claude-opus-5',
+  sarvam: 'sarvam-vision-1.5',
 };
 
 function AiSection({
