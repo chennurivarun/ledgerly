@@ -19,8 +19,23 @@ export const WORKERS_AI_DEFAULT_MODEL = '@cf/meta/llama-3.2-11b-vision-instruct'
 /** BYOK default. Settings.aiModel overrides. */
 export const ANTHROPIC_DEFAULT_MODEL = 'claude-opus-5';
 
-/** Image types both providers accept. */
+/**
+ * Sarvam Doc AI has no model parameter — every job runs on Sarvam's own
+ * document stack (Sarvam Vision). This id is a display label for job records;
+ * a Settings.aiModel override still replaces it there (same rule as every
+ * provider) but changes nothing about the request.
+ */
+export const SARVAM_DEFAULT_MODEL = 'sarvam-vision-1.5';
+
+/** Image types the Anthropic and Workers AI vision paths accept. */
 const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+/**
+ * Sarvam Doc AI's documented input formats (docs.sarvam.ai, 2026-08-13):
+ * PDF, JPEG and PNG. webp/gif are refused up front rather than bounced off
+ * Sarvam's own 400 mid-run.
+ */
+const SARVAM_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'application/pdf']);
 
 /** `image/jpg` is not an IANA type but browsers and scanners still emit it. */
 const MIME_ALIASES: Record<string, string> = {
@@ -56,16 +71,24 @@ export function selectProvider(settings: Settings): ProviderChoice {
   if (settings.aiProvider === 'workers-ai') {
     return { provider: 'workers-ai', model: override || WORKERS_AI_DEFAULT_MODEL };
   }
+  if (settings.aiProvider === 'sarvam') {
+    if (!settings.sarvamKeySet) {
+      throw new ApiFail(400, 'Add your Sarvam API key in Settings to use this provider.');
+    }
+    return { provider: 'sarvam', model: override || SARVAM_DEFAULT_MODEL };
+  }
   throw new ApiFail(400, 'Enable an AI provider in Settings to extract from documents.');
 }
 
 /**
- * Anthropic reads PDFs natively; the Workers AI vision models document image
- * input only, so a PDF there is refused instead of being sent as bytes the
- * model would hallucinate over.
+ * Anthropic reads PDFs natively; Sarvam Doc AI reads PDFs plus its documented
+ * image formats; the Workers AI vision models document image input only, so a
+ * PDF there is refused instead of being sent as bytes the model would
+ * hallucinate over.
  */
 export function supportsMime(provider: ProviderChoice['provider'], mimeType: string): boolean {
   const mime = canonicalMime(mimeType);
+  if (provider === 'sarvam') return SARVAM_MIME_TYPES.has(mime);
   if (IMAGE_MIME_TYPES.has(mime)) return true;
   return provider === 'anthropic' && mime === 'application/pdf';
 }
@@ -75,12 +98,19 @@ export function assertMimeSupported(
   mimeType: string,
 ): void {
   if (supportsMime(provider, mimeType)) return;
-  throw new ApiFail(
-    400,
-    provider === 'anthropic'
-      ? 'This file type cannot be read. Upload a PDF or an image of the receipt.'
-      : 'Workers AI reads images only. Upload a photo or scan of the receipt, or switch to the Anthropic provider for PDFs.',
-  );
+  if (provider === 'workers-ai') {
+    throw new ApiFail(
+      400,
+      'Workers AI reads images only. Upload a photo or scan of the receipt, or switch to the Anthropic or Sarvam provider for PDFs.',
+    );
+  }
+  if (provider === 'sarvam') {
+    throw new ApiFail(
+      400,
+      'Sarvam reads PDFs and JPEG or PNG images. Upload one of those, or switch the provider in Settings.',
+    );
+  }
+  throw new ApiFail(400, 'This file type cannot be read. Upload a PDF or an image of the receipt.');
 }
 
 // ---------------------------------------------------------------------------
@@ -90,19 +120,22 @@ export function assertMimeSupported(
 // ---------------------------------------------------------------------------
 
 export const WORKERS_AI_NO_PDF =
-  "Reading PDF statements needs the Anthropic provider — Workers AI models can't read PDFs yet.";
+  "Reading PDF statements needs the Anthropic or Sarvam provider — Workers AI models can't read PDFs yet.";
 
 /**
- * ponytail: v1 is BYOK-only. The privacy-first default cannot do the job at
- * all here (providers.ts has refused PDFs to Workers AI since sprint 3), so
- * rather than pretend, the endpoint names the provider and the reason.
+ * Statement extraction is BYOK-only: Anthropic (sprint 4) or Sarvam (sprint
+ * 10). The privacy-first default cannot do the job at all here (providers.ts
+ * has refused PDFs to Workers AI since sprint 3), so rather than pretend, the
+ * endpoint names the capable providers and the reason.
  */
 export function selectStatementProvider(settings: Settings): ProviderChoice {
   if (settings.aiProvider === 'workers-ai') throw new ApiFail(400, WORKERS_AI_NO_PDF);
   // 'off' and a missing key are the same configuration problems as receipt
   // extraction, and get the same messages.
   const choice = selectProvider(settings);
-  if (choice.provider !== 'anthropic') throw new ApiFail(400, WORKERS_AI_NO_PDF);
+  if (choice.provider !== 'anthropic' && choice.provider !== 'sarvam') {
+    throw new ApiFail(400, WORKERS_AI_NO_PDF);
+  }
   return choice;
 }
 

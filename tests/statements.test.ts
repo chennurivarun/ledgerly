@@ -398,7 +398,10 @@ function settingsWith(overrides: Partial<Settings>): Settings {
   return { ...defaultSettings(), ...overrides };
 }
 
-describe('selectStatementProvider — v1 is Anthropic-only, and says why', () => {
+// Sarvam joined Anthropic as a statement-capable provider in sprint 10 — its
+// gating matrix lives in tests/sarvam.test.ts; the cases here pin that the
+// original refusals and the Anthropic path are unchanged.
+describe('selectStatementProvider — BYOK-only, and says why', () => {
   it('names the reason when Workers AI is selected', () => {
     const settings = settingsWith({ aiProvider: 'workers-ai' });
     expect(() => selectStatementProvider(settings)).toThrowError(/can't read PDFs yet/i);

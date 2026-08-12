@@ -9,17 +9,21 @@ import { txFingerprint } from '../shared/fingerprint';
 import {
   MAX_FILE_BYTES,
   MAX_STATEMENT_ROWS,
+  type AiProvider,
   type BatchInsertResult,
   type StatementExtraction,
   type StatementJobStatus,
+  type StatementPreflight,
   type StatementRow,
   type StatementRowStatus,
 } from '../shared/types';
 import {
   assertStatementMime,
+  countPdfPages,
   emptyStatementRow,
   extractStatementFromDocument,
   lowestConfidence,
+  MAX_SARVAM_PAGES_PER_JOB,
   normalizeStatementRows,
   selectStatementProvider,
   type StatementRowFields,
@@ -234,6 +238,66 @@ export function flagDuplicates(
  */
 export function defaultStatementAccount(accounts: readonly string[]): string {
   return accounts.find((a) => a.trim().length > 0)?.trim() ?? DEFAULT_ACCOUNT;
+}
+
+// ---------------------------------------------------------------------------
+// Preflight (sprint 10) — what a run would involve, before anything is spent
+// ---------------------------------------------------------------------------
+
+/**
+ * The preflight numbers, kept pure so the math is directly testable. Batches:
+ * Sarvam runs one job per 10 pages (its documented per-job ceiling); Anthropic
+ * reads the whole PDF in one request. estimatedCost is the user's own saved
+ * per-page rate × pages, rounded to 2dp — and null whenever no rate is saved
+ * or the provider does not bill per page, because a guessed price is worse
+ * than no price.
+ */
+export function buildStatementPreflight(
+  pages: number,
+  provider: AiProvider,
+  pricePerPage: number | null,
+): StatementPreflight {
+  const batches = provider === 'sarvam' ? Math.ceil(pages / MAX_SARVAM_PAGES_PER_JOB) : 1;
+  const estimatedCost =
+    provider === 'sarvam' && pricePerPage !== null
+      ? Math.round(pages * pricePerPage * 100) / 100
+      : null;
+  return { pages, batches, provider, estimatedCost };
+}
+
+/**
+ * GET /api/documents/:id/statement/preflight — free and side-effect-free: no
+ * claim, no model call, nothing written. Runs the SAME configuration gates as
+ * the extract endpoint, so a preflight that answers cannot precede an extract
+ * that would 400.
+ */
+export async function statementPreflight(
+  env: Env,
+  documentId: string,
+): Promise<StatementPreflight> {
+  const doc = await readDocumentRow(env.DB, documentId);
+  const settings = await readSettings(env.DB);
+
+  const { provider } = selectStatementProvider(settings);
+  assertStatementMime(doc.mimeType);
+  if (doc.size > MAX_FILE_BYTES) {
+    throw new ApiFail(413, 'That file is too large to send for extraction.');
+  }
+
+  const object = await env.BUCKET.get(doc.objectKey);
+  if (!object) throw new ApiFail(404, 'The stored copy of that file is no longer available.');
+  const bytes = await object.arrayBuffer();
+
+  let pages: number;
+  try {
+    pages = await countPdfPages(bytes);
+  } catch (err) {
+    // pdfSplit's messages (unreadable / password-protected) are already the
+    // user-facing words; here the user has spent nothing, so it is a 400.
+    throw new ApiFail(400, err instanceof Error ? err.message : 'This PDF could not be read.');
+  }
+
+  return buildStatementPreflight(pages, provider, settings.sarvamPricePerPage);
 }
 
 // ---------------------------------------------------------------------------
