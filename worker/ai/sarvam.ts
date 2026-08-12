@@ -11,12 +11,17 @@
 //   partially_completed, failed, rejected; limits: 10 pages per PDF per job,
 //   200 MB, 10 requests/minute account-wide.
 //
-// Statements longer than 10 pages are split into sequential 10-page jobs
-// (worker/ai/pdfSplit.ts) and the rows merged back in order — the batches run
-// one at a time, which also keeps a 60-page statement (6 jobs + polls) well
-// inside the 10 rpm account limit. Everything returned here is still raw
-// model output in the receipt pipeline's envelope shape — worker/ai/normalize
-// re-checks every field before any of it reaches D1 (VISION.md principle 2).
+// Statements longer than 10 pages are split into 10-page jobs
+// (worker/ai/pdfSplit.ts). Since sprint 12 the statement flow is resumable:
+// this module only CREATES the jobs (submitSarvamStatementJobs) and exposes
+// one-shot status/results calls (pollSarvamJobStatus / fetchSarvamJobRows) —
+// worker/statements.ts drives them across client ticks, so no request ever
+// polls a dense statement to completion (real Sarvam latency exceeded any
+// honest in-request ceiling, and longer polling would blow the free plan's
+// per-request subrequest cap). Receipts are small single jobs and keep the
+// original in-request create→poll→results loop. Everything returned here is
+// still raw model output — worker/ai/normalize re-checks every field before
+// any of it reaches D1 (VISION.md principle 2).
 import { isRecord } from '../util';
 import { splitPdfIntoBatches } from './pdfSplit';
 
@@ -264,19 +269,23 @@ interface JobOutcome {
 
 const TERMINAL_STATUSES = new Set(['completed', 'partially_completed', 'failed', 'rejected']);
 
+/** True once Sarvam will never change this job's status again. */
+export function isSarvamTerminal(status: string): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
+
 /**
- * Run one extract job to a terminal state and fetch its result. The wait is
- * bounded by iteration count (`waited` accumulates the configured interval),
- * not by the wall clock, so the timeout behaves identically under the tests'
- * no-op sleep and in production.
+ * Create one extract job — the request statements resume from. Nothing is
+ * polled here; the create response's own status rides along so the receipt
+ * loop below behaves exactly as it did before this seam was extracted.
  */
-async function runExtractJob(
+async function createExtractJob(
   apiKey: string,
   file: Blob,
   filename: string,
   schema: Record<string, unknown>,
   deps: ResolvedDeps,
-): Promise<JobOutcome> {
+): Promise<{ jobId: string; status: string }> {
   const form = new FormData();
   form.append('file', file, filename);
   // Sarvam takes the schema as a JSON *string* field, not a JSON part.
@@ -288,8 +297,27 @@ async function runExtractJob(
   });
   const jobId = typeof created.job_id === 'string' ? created.job_id : '';
   if (!jobId) throw new Error(UNREADABLE_RESPONSE);
+  return { jobId, status: typeof created.status === 'string' ? created.status : 'pending' };
+}
 
-  let status = typeof created.status === 'string' ? created.status : 'pending';
+/**
+ * Run one extract job to a terminal state and fetch its result — the receipt
+ * path's in-request loop (receipts are single small jobs; the 90s ceiling is
+ * honest for them). The wait is bounded by iteration count (`waited`
+ * accumulates the configured interval), not by the wall clock, so the timeout
+ * behaves identically under the tests' no-op sleep and in production.
+ */
+async function runExtractJob(
+  apiKey: string,
+  file: Blob,
+  filename: string,
+  schema: Record<string, unknown>,
+  deps: ResolvedDeps,
+): Promise<JobOutcome> {
+  const created = await createExtractJob(apiKey, file, filename, schema, deps);
+  const jobId = created.jobId;
+
+  let status = created.status;
   let waited = 0;
   while (!TERMINAL_STATUSES.has(status)) {
     if (waited >= deps.pollTimeoutMs) {
@@ -325,67 +353,113 @@ async function runExtractJob(
 // Public runners
 // ---------------------------------------------------------------------------
 
-export interface SarvamStatementRun {
-  /** Envelope-shaped row objects, merged across batches in page order. */
-  rows: unknown[];
-  /** A batch failed after at least one succeeded, a job was only partially
-   * processed, or pages may otherwise be missing — the loud-partial signal. */
-  truncated: boolean;
+/** What one submit attempt produced — never thrown, so a half-submitted read
+ * can record the jobs that DO exist before the caller fails the run. */
+export interface SarvamStatementSubmit {
+  /** Ids of the jobs actually created, in batch (page) order. */
+  jobIds: string[];
+  /** Total batches the split produced (0 when the split itself failed). */
+  batchCount: number;
+  /** The readable error that stopped submission, or null when every batch's
+   * job was created. */
+  failure: Error | null;
 }
 
 /**
- * Read one PDF statement of any length: split into ≤10-page chunks, run one
- * extract job per chunk sequentially, merge rows back in order.
+ * Submit one PDF statement of any length: split into ≤10-page chunks and
+ * create one extract job per chunk, in page order, WITHOUT polling any of
+ * them — worker/statements.ts persists the returned job ids and drives them
+ * to completion across client ticks. Creation stays sequential, which keeps
+ * even a 100-page statement (10 creates) inside the 10 rpm account limit and
+ * the per-request subrequest cap.
  *
- * Batch-boundary honesty: chunks do not overlap, so a row printed across a
- * page boundary may be lost or misread — that risk rides the existing loud
- * 'partial'/review semantics rather than being silently smoothed over.
- * Failure semantics follow the statement precedent (sprint 4): if a batch
- * fails after at least one has succeeded, what was read is returned with
- * `truncated: true` (a loud partial beats losing paid-for pages); if the
- * very first batch fails, the run failed and the error says why. Later
- * batches are not attempted past a failure — "rows missing from the end"
- * stays true.
+ * Batch-boundary honesty is unchanged from the blocking runner this replaced:
+ * chunks do not overlap, so a row printed across a page boundary can be lost
+ * or misread — that risk rides the loud 'partial'/review semantics.
+ *
+ * Never throws: a create failure partway (or a split failure) comes back as
+ * `failure` alongside whatever jobs were already created, so the caller can
+ * record them (they exist at Sarvam and were paid for) while failing the run
+ * readably instead of leaving orphans it would poll forever.
  */
-export async function runSarvamStatement(
+export async function submitSarvamStatementJobs(
   apiKey: string,
   bytes: ArrayBuffer | Uint8Array,
   categories: readonly string[],
   deps: SarvamDeps = {},
-): Promise<SarvamStatementRun> {
+): Promise<SarvamStatementSubmit> {
   const resolved = resolveDeps(deps);
   const schema = sarvamStatementSchema(categories);
-  const batches = await splitPdfIntoBatches(bytes, MAX_SARVAM_PAGES_PER_JOB);
 
-  const rows: unknown[] = [];
-  let truncated = false;
-  let succeeded = 0;
+  let batches: Uint8Array[];
+  try {
+    batches = await splitPdfIntoBatches(bytes, MAX_SARVAM_PAGES_PER_JOB);
+  } catch (err) {
+    return {
+      jobIds: [],
+      batchCount: 0,
+      failure: err instanceof Error ? err : new Error('This PDF could not be read.'),
+    };
+  }
 
+  const jobIds: string[] = [];
   for (let i = 0; i < batches.length; i++) {
     const file = new Blob([batches[i] as unknown as BlobPart], { type: 'application/pdf' });
-    let outcome: JobOutcome;
     try {
-      outcome = await runExtractJob(
+      const created = await createExtractJob(
         apiKey,
         file,
         `statement-part-${i + 1}.pdf`,
         schema,
         resolved,
       );
+      jobIds.push(created.jobId);
     } catch (err) {
-      if (succeeded > 0) {
-        truncated = true;
-        break;
-      }
-      throw err;
+      return {
+        jobIds,
+        batchCount: batches.length,
+        failure: err instanceof Error ? err : new Error(UNREADABLE_RESPONSE),
+      };
     }
-    const batchRows = Array.isArray(outcome.result.rows) ? outcome.result.rows : [];
-    for (const raw of batchRows) rows.push(toStatementEnvelopeRow(raw));
-    if (outcome.partial) truncated = true;
-    succeeded++;
   }
+  return { jobIds, batchCount: batches.length, failure: null };
+}
 
-  return { rows, truncated };
+/** One status poll for one job — a single subrequest, no waiting. */
+export async function pollSarvamJobStatus(
+  apiKey: string,
+  jobId: string,
+  deps: SarvamDeps = {},
+): Promise<string> {
+  const resolved = resolveDeps(deps);
+  const polled = await fetchJson(
+    resolved,
+    apiKey,
+    `${SARVAM_JOB_BASE}/${encodeURIComponent(jobId)}/status`,
+  );
+  return typeof polled.status === 'string' ? polled.status : '';
+}
+
+/**
+ * Fetch one completed (or partially completed) job's raw rows. Raw means raw:
+ * the plain objects Sarvam returned, NOT the envelope shape — the tick stores
+ * them as-is and the finalize step runs toStatementEnvelopeRow + normalize,
+ * so persisted state holds exactly what the provider said and nothing more.
+ * A results body without a rows array reads as zero rows, not an error.
+ */
+export async function fetchSarvamJobRows(
+  apiKey: string,
+  jobId: string,
+  deps: SarvamDeps = {},
+): Promise<unknown[]> {
+  const resolved = resolveDeps(deps);
+  const fetched = await fetchJson(
+    resolved,
+    apiKey,
+    `${SARVAM_JOB_BASE}/${encodeURIComponent(jobId)}/results`,
+  );
+  if (!isRecord(fetched.result)) throw new Error(UNREADABLE_RESPONSE);
+  return Array.isArray(fetched.result.rows) ? fetched.result.rows : [];
 }
 
 /**

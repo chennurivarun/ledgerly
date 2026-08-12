@@ -1,7 +1,7 @@
 // Documents page (spec §14) — upload + Drive inbox status + vault list.
 // objectKey is never rendered; no encryption claims are made anywhere here.
 import { Download, ExternalLink, FileText, FolderSync, Sparkles, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fmtDate } from '../../shared/format';
 import {
@@ -28,6 +28,7 @@ import {
   preflightSummary,
   providerCanReadPdfStatements,
 } from '../components/ai/preflightHelpers';
+import { resumableStatementIds, statementProgressLabel } from '../components/ai/statementHelpers';
 import { StatementReviewModal } from '../components/ai/StatementReviewModal';
 import { InboxConfirmModal } from '../components/inbox/InboxConfirmModal';
 import { InboxSection } from '../components/inbox/InboxSection';
@@ -108,7 +109,9 @@ function statementLabel(statement: StatementExtraction): string {
   const proposed = statement.rows.filter((r) => r.status === 'proposed').length;
   switch (statement.status) {
     case 'pending':
-      return 'Reading statement…';
+      // A resumable read reports which batch it is on; a blocking read has
+      // no progress to report and keeps the original copy.
+      return statementProgressLabel(statement.progress) ?? 'Reading statement…';
     case 'suggested':
       return `${proposed} proposed`;
     case 'partial':
@@ -290,6 +293,49 @@ export default function Documents() {
       clearTimeout(timeoutId);
     };
   }, [hasPending, reviewing, preflight, refreshQuiet]);
+
+  // Tick driver (sprint 12): while any statement read is resumable-pending
+  // (pending WITH progress — the server parked provider state for it),
+  // re-POST extract every ~6s so the read advances server-side; each POST is
+  // a tick, not a new run. Mechanism chosen where the brief left it open:
+  // ticks track their in-flight state in a ref, NOT in the `running` slot —
+  // `running` is the page-wide busy that disables every other action, and a
+  // background tick must never lock the page (or re-render it) on every
+  // start/stop. The one-in-flight-per-document rule that slot enforces for
+  // user actions is enforced here by the ref set, and every other document's
+  // buttons stay live throughout. Pause rules mirror the refresh poll above:
+  // any open modal (review or preflight) pauses ticking, and the timer only
+  // re-arms after the previous round settles so ticks never overlap
+  // themselves. A failed tick is silent — the next round retries (poll
+  // semantics, not user-action semantics) and the server's 20-minute
+  // deadline bounds how long that can repeat. Keyed on the joined id list so
+  // refresh churn that changes nothing does not re-arm the timer.
+  const tickKey = resumableStatementIds(statements).join(',');
+  const tickInFlight = useRef(new Set<string>());
+  useEffect(() => {
+    if (tickKey === '' || reviewing || preflight) return;
+    const ids = tickKey.split(',');
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      const started = ids
+        .filter((id) => !tickInFlight.current.has(id))
+        .map((id) => {
+          tickInFlight.current.add(id);
+          return extractStatement(id)
+            .catch(() => undefined)
+            .finally(() => tickInFlight.current.delete(id));
+        });
+      void Promise.allSettled(started).then(() => {
+        if (!cancelled) timeoutId = setTimeout(tick, 6000);
+      });
+    };
+    timeoutId = setTimeout(tick, 6000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [tickKey, reviewing, preflight, extractStatement]);
 
   // Stable identity across re-renders (setReviewing from useState never
   // changes) — passed to whichever modal is open so its internal onClose

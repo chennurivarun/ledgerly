@@ -1,7 +1,8 @@
-// The Sarvam provider (sprint 10): PDF splitting math, the schema dialect
-// adaptation, the fixed-confidence envelope pin, the batched statement runner
-// (merge order + loud-partial semantics), preflight math, provider gating and
-// the write-only key/price settings.
+// The Sarvam provider (sprint 10, resumable since sprint 12): PDF splitting
+// math, the schema dialect adaptation, the fixed-confidence envelope pin, the
+// no-polling statement submit + the tick primitives it hands to
+// worker/statements.ts, the receipt path's in-request loop, preflight math,
+// provider gating and the write-only key/price settings.
 //
 // No network anywhere: the HTTP layer runs against an injectable fetch, and
 // the PDF fixtures are built in-test with pdf-lib.
@@ -19,12 +20,15 @@ import {
   WORKERS_AI_NO_PDF,
 } from '../worker/ai/providers';
 import {
+  fetchSarvamJobRows,
+  isSarvamTerminal,
   MAX_SARVAM_PAGES_PER_JOB,
+  pollSarvamJobStatus,
   runSarvamReceipt,
-  runSarvamStatement,
   SARVAM_FIELD_CONFIDENCE,
   sarvamReceiptSchema,
   sarvamStatementSchema,
+  submitSarvamStatementJobs,
   toReceiptEnvelope,
   toStatementEnvelopeRow,
 } from '../worker/ai/sarvam';
@@ -261,9 +265,11 @@ describe('envelope adaptation and the fixed confidence', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The batched statement runner, against a scripted fetch. Job lifecycle per
-// docs.sarvam.ai: POST extract → {job_id, status} → GET status to a terminal
-// → GET results → {result}.
+// The resumable statement flow's provider half, against a scripted fetch.
+// Job lifecycle per docs.sarvam.ai: POST extract → {job_id, status} → GET
+// status to a terminal → GET results → {result}. Since sprint 12 statements
+// never poll in-request: submit creates every batch job and returns, and
+// worker/statements.ts drives one-shot status/results calls across ticks.
 // ---------------------------------------------------------------------------
 
 interface Call {
@@ -326,41 +332,23 @@ function statementRow(merchant: string): Record<string, unknown> {
   return { date: '2026-03-04', merchant, amount: 100, type: 'expense', category: 'Dining' };
 }
 
-describe('runSarvamStatement', () => {
-  it('runs one job per 10-page batch, sequentially, and merges rows in order', async () => {
-    const api = sarvamApi([
-      { statuses: ['running', 'completed'], result: { rows: [statementRow('b1-r1'), statementRow('b1-r2')] } },
-      { statuses: ['completed'], result: { rows: [statementRow('b2-r1')] } },
-      { statuses: ['completed'], result: { rows: [statementRow('b3-r1')] } },
-    ]);
-    const run = await runSarvamStatement('sk-test', await pdfWithPages(25), CATEGORIES, {
+describe('submitSarvamStatementJobs — create everything, poll nothing', () => {
+  it('creates one job per 10-page batch, in page order, without a single poll', async () => {
+    const api = sarvamApi([{}, {}, {}]);
+    const submit = await submitSarvamStatementJobs('sk-test', await pdfWithPages(25), CATEGORIES, {
       fetchImpl: api.fetchImpl,
       ...FAST,
     });
-
-    expect(run.truncated).toBe(false);
-    const merchants = run.rows.map(
-      (r) => ((r as Record<string, unknown>).merchant as { value: unknown }).value,
-    );
-    expect(merchants).toEqual(['b1-r1', 'b1-r2', 'b2-r1', 'b3-r1']);
-    // Envelope shape with the pinned confidence, ready for normalize.
-    expect((run.rows[0] as Record<string, unknown>).amount).toEqual({
-      value: 100,
-      confidence: SARVAM_FIELD_CONFIDENCE,
-    });
-
-    // Three creations, strictly one at a time (creation N+1 after results N).
-    const extracts = api.calls
-      .map((c, i) => ({ ...c, i }))
-      .filter((c) => c.url.endsWith('/extract'));
-    expect(extracts.length).toBe(3);
-    const firstResults = api.calls.findIndex((c) => c.url.endsWith('/job-1/results'));
-    expect(extracts[1].i).toBeGreaterThan(firstResults);
+    expect(submit).toEqual({ jobIds: ['job-1', 'job-2', 'job-3'], batchCount: 3, failure: null });
+    // The whole point of the resumable flow: every call was a creation —
+    // not one /status, not one /results.
+    expect(api.calls).toHaveLength(3);
+    expect(api.calls.every((c) => c.url.endsWith('/extract'))).toBe(true);
   });
 
   it('authenticates with the api-subscription-key header and sends the schema as a JSON string', async () => {
-    const api = sarvamApi([{ result: { rows: [] } }]);
-    await runSarvamStatement('sk-test', await pdfWithPages(1), CATEGORIES, {
+    const api = sarvamApi([{}]);
+    await submitSarvamStatementJobs('sk-test', await pdfWithPages(1), CATEGORIES, {
       fetchImpl: api.fetchImpl,
       ...FAST,
     });
@@ -373,89 +361,99 @@ describe('runSarvamStatement', () => {
     expect(body.get('file')).toBeInstanceOf(Blob);
   });
 
-  it('a batch failing after one succeeded returns what was read, truncated=true, and stops', async () => {
-    const api = sarvamApi([
-      { result: { rows: [statementRow('kept-1'), statementRow('kept-2')] } },
-      { createResponse: json(500, {}) },
-      { result: { rows: [statementRow('never-reached')] } },
-    ]);
-    const run = await runSarvamStatement('sk-test', await pdfWithPages(25), CATEGORIES, {
+  it('a create failing partway records the jobs that DO exist plus the readable failure, and stops', async () => {
+    const api = sarvamApi([{}, { createResponse: json(500, {}) }, {}]);
+    const submit = await submitSarvamStatementJobs('sk-test', await pdfWithPages(25), CATEGORIES, {
       fetchImpl: api.fetchImpl,
       ...FAST,
     });
-    expect(run.truncated).toBe(true);
-    expect(run.rows.length).toBe(2);
-    // The third batch was never attempted: rows can only be missing from the END.
-    expect(api.calls.filter((c) => c.url.endsWith('/extract')).length).toBe(2);
+    // job-1 exists at Sarvam (and was paid for) — the caller records it while
+    // failing the run; batch 3 was never attempted past the failure.
+    expect(submit.jobIds).toEqual(['job-1']);
+    expect(submit.batchCount).toBe(3);
+    expect(submit.failure?.message).toMatch(/could not process/i);
+    expect(api.calls).toHaveLength(2);
   });
 
-  it('a partially_completed job keeps its rows but marks the run truncated', async () => {
-    const api = sarvamApi([
-      { statuses: ['partially_completed'], result: { rows: [statementRow('partial-read')] } },
-    ]);
-    const run = await runSarvamStatement('sk-test', await pdfWithPages(1), CATEGORIES, {
-      fetchImpl: api.fetchImpl,
-      ...FAST,
-    });
-    expect(run.truncated).toBe(true);
-    expect(run.rows.length).toBe(1);
-  });
-
-  it('401/403 on the first batch throws the auth message, original body dropped', async () => {
+  it('401/403 come back as the auth failure, original body dropped', async () => {
     for (const status of [401, 403]) {
       const api = sarvamApi([
         { createResponse: json(status, { error: 'secret-echoing body must never surface' }) },
       ]);
-      await expect(
-        runSarvamStatement('sk-bad', await pdfWithPages(1), CATEGORIES, {
-          fetchImpl: api.fetchImpl,
-          ...FAST,
-        }),
-      ).rejects.toThrow('Sarvam rejected the API key. Check the key saved in Settings.');
-    }
-  });
-
-  it('429 throws the rate-limit message', async () => {
-    const api = sarvamApi([{ createResponse: json(429, {}) }]);
-    await expect(
-      runSarvamStatement('sk-test', await pdfWithPages(1), CATEGORIES, {
+      const submit = await submitSarvamStatementJobs('sk-bad', await pdfWithPages(1), CATEGORIES, {
         fetchImpl: api.fetchImpl,
         ...FAST,
-      }),
-    ).rejects.toThrow(/rate limited/i);
-  });
-
-  it('a job that never reaches a terminal state times out readably', async () => {
-    const api = sarvamApi([{ statuses: ['running'], result: { rows: [] } }]);
-    await expect(
-      runSarvamStatement('sk-test', await pdfWithPages(1), CATEGORIES, {
-        fetchImpl: api.fetchImpl,
-        sleep: async () => {},
-        pollIntervalMs: 2,
-        pollTimeoutMs: 6,
-      }),
-    ).rejects.toThrow(/did not finish/i);
-  });
-
-  it('a failed or rejected job throws readably', async () => {
-    for (const terminal of ['failed', 'rejected']) {
-      const api = sarvamApi([{ statuses: [terminal] }]);
-      await expect(
-        runSarvamStatement('sk-test', await pdfWithPages(1), CATEGORIES, {
-          fetchImpl: api.fetchImpl,
-          ...FAST,
-        }),
-      ).rejects.toThrow(/could not read this document/i);
+      });
+      expect(submit.jobIds).toEqual([]);
+      expect(submit.failure?.message).toBe(
+        'Sarvam rejected the API key. Check the key saved in Settings.',
+      );
+      expect(JSON.stringify(submit)).not.toContain('secret-echoing');
     }
   });
 
-  it('a completed job with no rows array contributes zero rows, not an error', async () => {
-    const api = sarvamApi([{ result: { unexpected: true } }]);
-    const run = await runSarvamStatement('sk-test', await pdfWithPages(1), CATEGORIES, {
+  it('429 comes back as the rate-limit failure', async () => {
+    const api = sarvamApi([{ createResponse: json(429, {}) }]);
+    const submit = await submitSarvamStatementJobs('sk-test', await pdfWithPages(1), CATEGORIES, {
       fetchImpl: api.fetchImpl,
       ...FAST,
     });
-    expect(run).toEqual({ rows: [], truncated: false });
+    expect(submit.failure?.message).toMatch(/rate limited/i);
+  });
+
+  it('an encrypted PDF fails before anything reaches Sarvam — zero jobs, the password message', async () => {
+    const api = sarvamApi([{}]);
+    const submit = await submitSarvamStatementJobs('sk-test', await encryptedPdf(), CATEGORIES, {
+      fetchImpl: api.fetchImpl,
+      ...FAST,
+    });
+    expect(submit).toMatchObject({ jobIds: [], batchCount: 0 });
+    expect(submit.failure?.message).toMatch(/password-protected/i);
+    expect(api.calls).toHaveLength(0);
+  });
+});
+
+describe('pollSarvamJobStatus / fetchSarvamJobRows — the tick primitives', () => {
+  it('one poll is one subrequest returning the raw status', async () => {
+    const api = sarvamApi([{ statuses: ['running', 'completed'], result: { rows: [] } }]);
+    await submitSarvamStatementJobs('sk-test', await pdfWithPages(1), CATEGORIES, {
+      fetchImpl: api.fetchImpl,
+      ...FAST,
+    });
+    expect(await pollSarvamJobStatus('sk-test', 'job-1', { fetchImpl: api.fetchImpl })).toBe('running');
+    expect(await pollSarvamJobStatus('sk-test', 'job-1', { fetchImpl: api.fetchImpl })).toBe('completed');
+    expect(api.calls.filter((c) => c.url.endsWith('/job-1/status'))).toHaveLength(2);
+    expect(api.calls.filter((c) => c.url.endsWith('/results'))).toHaveLength(0);
+  });
+
+  it('fetchSarvamJobRows returns the RAW rows — no envelope, no trust added yet', async () => {
+    const api = sarvamApi([{ result: { rows: [statementRow('raw-1'), statementRow('raw-2')] } }]);
+    await submitSarvamStatementJobs('sk-test', await pdfWithPages(1), CATEGORIES, {
+      fetchImpl: api.fetchImpl,
+      ...FAST,
+    });
+    const rows = await fetchSarvamJobRows('sk-test', 'job-1', { fetchImpl: api.fetchImpl });
+    // Plain objects exactly as returned — the envelope + normalize happen at
+    // finalize in worker/statements.ts, so stored tick state adds no trust.
+    expect(rows).toEqual([statementRow('raw-1'), statementRow('raw-2')]);
+  });
+
+  it('a results body without a rows array reads as zero rows, not an error', async () => {
+    const api = sarvamApi([{ result: { unexpected: true } }]);
+    await submitSarvamStatementJobs('sk-test', await pdfWithPages(1), CATEGORIES, {
+      fetchImpl: api.fetchImpl,
+      ...FAST,
+    });
+    expect(await fetchSarvamJobRows('sk-test', 'job-1', { fetchImpl: api.fetchImpl })).toEqual([]);
+  });
+
+  it('isSarvamTerminal knows exactly the four documented terminal statuses', () => {
+    for (const status of ['completed', 'partially_completed', 'failed', 'rejected']) {
+      expect(isSarvamTerminal(status)).toBe(true);
+    }
+    for (const status of ['pending', 'running', 'queued', '']) {
+      expect(isSarvamTerminal(status)).toBe(false);
+    }
   });
 });
 
@@ -478,6 +476,33 @@ describe('runSarvamReceipt', () => {
     // The receipt schema, not the statement schema, rides the form.
     const body = api.calls[0].init?.body as FormData;
     expect(JSON.parse(body.get('schema') as string)).toEqual(sarvamReceiptSchema(CATEGORIES));
+  });
+
+  // Receipts are the ONLY remaining user of the in-request create→poll→results
+  // loop (statements went resumable in sprint 12), so its timeout and
+  // terminal-failure behavior is pinned here.
+  it('a receipt job that never reaches a terminal state times out readably', async () => {
+    const api = sarvamApi([{ statuses: ['running'], result: {} }]);
+    await expect(
+      runSarvamReceipt('sk-test', ascii('fake-image'), 'image/png', CATEGORIES, {
+        fetchImpl: api.fetchImpl,
+        sleep: async () => {},
+        pollIntervalMs: 2,
+        pollTimeoutMs: 6,
+      }),
+    ).rejects.toThrow(/did not finish/i);
+  });
+
+  it('a failed or rejected receipt job throws readably', async () => {
+    for (const terminal of ['failed', 'rejected']) {
+      const api = sarvamApi([{ statuses: [terminal] }]);
+      await expect(
+        runSarvamReceipt('sk-test', ascii('fake-image'), 'image/png', CATEGORIES, {
+          fetchImpl: api.fetchImpl,
+          ...FAST,
+        }),
+      ).rejects.toThrow(/could not read this document/i);
+    }
   });
 });
 
