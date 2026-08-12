@@ -524,13 +524,17 @@ export async function confirmStatementRows(
   // Validate before inserting so a bad row is a 400 the review screen can point
   // at, and so every row that survives is one we can honestly mark 'confirmed'
   // — inserted or already-there, both mean the user's row is now in the ledger.
+  // receipt is server-owned: a statement line is not a receipt, and
+  // validateTxInput lets a payload boolean beat defaults, so it is overwritten
+  // on every row before validation (the mail-in confirm's pattern).
   const defaults = { forceSource: 'document' as const, receipt: false };
-  list.forEach((raw, index) => {
+  const rows = list.map((raw) => (isRecord(raw) ? { ...raw, receipt: false } : raw));
+  rows.forEach((raw, index) => {
     const checked = validateTxInput(raw, defaults);
     if (!checked.ok) throw new ApiFail(400, clip(`Row ${index + 1}: ${checked.error}`));
   });
 
-  const result = await insertTransactions(env.DB, list, defaults);
+  const result = await insertTransactions(env.DB, rows, defaults);
 
   const now = new Date().toISOString();
   await markRows(env.DB, documentId, [...rowIds], 'confirmed');
