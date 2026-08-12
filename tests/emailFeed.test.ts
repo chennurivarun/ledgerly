@@ -164,6 +164,42 @@ describe('generic-en — realistic alerts that must parse', () => {
   });
 });
 
+describe('generic-en — merchant capture stops at boundary markers (integration-QA fix)', () => {
+  // The exact live fixture that caught the greedy capture: without the
+  // boundary cut, the merchant came back as the whole trailing clause and
+  // would poison duplicate fingerprints + sprint-5 rule suggestions.
+  it("card boilerplate: '… with STARBUCKS STORE 08841 on your card ending 4321.'", () => {
+    expect(
+      parse('You made a $23.45 transaction with STARBUCKS STORE 08841 on your card ending 4321.'),
+    ).toMatchObject({ merchant: 'STARBUCKS STORE 08841', amount: 23.45, type: 'expense' });
+  });
+
+  it("date tail after an aux clause: '… payment to OAKWOOD APARTMENTS was made on 08/12'", () => {
+    expect(parse('A $1,200.00 payment to OAKWOOD APARTMENTS was made on 08/12')).toMatchObject({
+      merchant: 'OAKWOOD APARTMENTS',
+      amount: 1200,
+    });
+  });
+
+  it("'using card' / 'via' / time-like 'at' tails are cut", () => {
+    expect(parse('You made a $9.00 purchase at TARGET using card 4321')).toMatchObject({
+      merchant: 'TARGET',
+    });
+    expect(parse('A $15.00 payment to ACME CORP via UPI was made')).toMatchObject({
+      merchant: 'ACME CORP',
+    });
+    expect(parse('You spent $7.50 at CAFE NERO at 12:45')).toMatchObject({
+      merchant: 'CAFE NERO',
+    });
+  });
+
+  // Never-guess backstop: when truncation leaves nothing, there is no
+  // merchant fact to propose — the whole email lands unparsed.
+  it('a capture that truncates to empty makes the email unparsed', () => {
+    expect(parse('You spent $10.00 at via UPI')).toBeNull();
+  });
+});
+
 describe('generic-en — ambiguity always means unparsed, never a guess', () => {
   // Direction flips signs; the S4 statement sprint's critical was exactly a
   // guessed `type`. Both kinds of keyword present → refuse.
