@@ -115,6 +115,15 @@ allowlist starts empty, so a fresh install ingests nothing. Parsing is
 deterministic — bank formats are community-contributed parser packs (code,
 not data). Setup guide: [docs/EMAIL-FEED.md](docs/EMAIL-FEED.md).
 
+### Chat with your money (MCP)
+
+Ledgerly is a read-only [MCP](https://modelcontextprotocol.io) server: add
+your own instance to Claude Code, Claude Desktop, or any MCP client and ask
+questions in plain language — "what did I spend on dining last month?",
+"what's my 60-day cash flow?" Your client talks directly to your Worker;
+Ledgerly never calls any model, and no mutating tool exists. Setup:
+[docs/MCP.md](docs/MCP.md).
+
 ### Scheduled imports
 
 `GET/POST /api/drive-sync` implements a complete import contract

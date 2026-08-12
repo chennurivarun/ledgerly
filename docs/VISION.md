@@ -111,10 +111,12 @@ comfortable letting AI make financial decisions autonomously).
    scenarios in plain language. ✅ *Deterministic projection shipped August
    2026 (30/60/90-day horizons on the Recurring page, income + expense
    series); AI narration still to come.*
-5. **Natural-language search / MCP.** Read-only. Expose the user's data as
-   an MCP server so they can point *their own* AI client at *their own*
-   finances — "chat with your money" without the data ever leaving their
-   control.
+5. **Natural-language search / MCP.** ✅ *Shipped August 2026.* Read-only.
+   Expose the user's data as an MCP server so they can point *their own* AI
+   client at *their own* finances — "chat with your money" without the data
+   ever leaving their control. Six deterministic tools (search, summary,
+   recurring, forecast, budgets, briefing) behind a bearer token; read-only
+   is structural — no mutating tool exists. Setup in docs/MCP.md.
 6. **Proactive briefings & anomaly alerts** — last, once 1–4 generate the
    signal that makes alerts useful instead of noisy. ✅ *Briefings shipped
    August 2026: a deterministic weekly/daily digest (last-7-days activity,
