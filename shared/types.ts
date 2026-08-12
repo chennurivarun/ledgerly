@@ -137,9 +137,22 @@ export interface Settings {
   /** Whether a BYOK API key is stored. The key itself is write-only — it is
    * NEVER returned by any endpoint. */
   aiKeySet: boolean;
+  /** Proactive briefings (sprint 7, vision phase-2 item 6). Off by default. */
+  briefingsEnabled: boolean;
+  briefingCadence: BriefingCadence;
+  /** WhatsApp Business Cloud API delivery (BYO Meta credentials).
+   * Recipient in E.164 digits; phoneNumberId from the user's Meta app. */
+  briefingWhatsappRecipient: string;
+  briefingWhatsappPhoneNumberId: string;
+  /** Whether a Cloud API access token is stored. Write-only, NEVER echoed. */
+  briefingWhatsappTokenSet: boolean;
+  /** ISO timestamp of the last successful briefing send; null = never. */
+  lastBriefingSentAt: string | null;
 }
 
 export type AiProvider = 'off' | 'workers-ai' | 'anthropic';
+
+export type BriefingCadence = 'daily' | 'weekly';
 
 // Starter definitions are lookup configuration only — never financial records (spec §3).
 export const STARTER_CATEGORIES = [
@@ -185,6 +198,12 @@ export function defaultSettings(): Settings {
     aiProvider: 'off',
     aiModel: null,
     aiKeySet: false,
+    briefingsEnabled: false,
+    briefingCadence: 'weekly',
+    briefingWhatsappRecipient: '',
+    briefingWhatsappPhoneNumberId: '',
+    briefingWhatsappTokenSet: false,
+    lastBriefingSentAt: null,
   };
 }
 

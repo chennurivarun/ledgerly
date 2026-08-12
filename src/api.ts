@@ -1,5 +1,6 @@
 // Typed API client — the ONLY place the frontend talks to the server.
 // Pages never call fetch directly; they go through the store, which calls this.
+import type { Briefing } from '../shared/briefing';
 import {
   WIPE_CONFIRMATION,
   type ApiErrorBody,
@@ -19,6 +20,13 @@ import {
   type UploadResult,
   type WipeResult,
 } from '../shared/types';
+
+/** Preview payload: the structured briefing plus its rendered message text. */
+export interface BriefingPreview {
+  briefing: Briefing;
+  /** The exact plain-text message a delivery would send. */
+  text: string;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -139,6 +147,13 @@ export const api = {
       headers: JSON_HEADERS,
       body: JSON.stringify(input),
     }),
+
+  /** Compute today's briefing without sending anything. */
+  previewBriefing: () => request<BriefingPreview>('/api/briefings/preview'),
+
+  /** Compute today's briefing and deliver it over WhatsApp. */
+  sendBriefing: () =>
+    request<{ ok: true; sentTo: string }>('/api/briefings/send', { method: 'POST' }),
 
   wipeAll: () =>
     request<WipeResult>('/api/state', {

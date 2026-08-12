@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api } from './api';
+import { api, type BriefingPreview } from './api';
 import { setActiveCurrency } from '../shared/format';
 import {
   defaultSettings,
@@ -85,6 +85,10 @@ interface AppStore {
   acceptRuleSuggestion(s: RuleSuggestion): Promise<void>;
   /** Suppress a suggestion permanently for this merchant/category pair. */
   dismissRuleSuggestion(s: RuleSuggestion): Promise<void>;
+  /** Compute today's briefing server-side; throws ApiError for inline handling. */
+  previewBriefing(): Promise<BriefingPreview>;
+  /** Deliver today's briefing over WhatsApp; refreshes lastBriefingSentAt. */
+  sendBriefing(): Promise<{ ok: true; sentTo: string }>;
   /** Internal: background refresh that never clobbers UI on failure. */
   refreshQuiet(): Promise<void>;
 }
@@ -322,5 +326,16 @@ export const useStore = create<AppStore>((set, get) => ({
     set((st) => ({
       ruleSuggestions: st.ruleSuggestions.filter((x) => x.id !== sug.id),
     }));
+  },
+
+  async previewBriefing() {
+    return api.previewBriefing();
+  },
+
+  async sendBriefing() {
+    const res = await api.sendBriefing();
+    // Server stamps lastBriefingSentAt; pull it rather than guessing it.
+    void get().refreshQuiet();
+    return res;
   },
 }));
