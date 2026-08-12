@@ -4,6 +4,7 @@ import { CURRENCY_CODES } from '../shared/currencies';
 import {
   PERIOD_OPTIONS,
   type AiProvider,
+  type BriefingCadence,
   type Budget,
   type Cadence,
   type DriveSyncMeta,
@@ -18,9 +19,11 @@ import {
 import { readRules, readTags } from './queries';
 import {
   clearAiApiKey,
+  clearBriefingWhatsappToken,
   readSettings,
   redactAiSecret,
   writeAiApiKey,
+  writeBriefingWhatsappToken,
   writeSettings,
 } from './settingsStore';
 import { ApiFail, isIsoDate, isRecord, normalizeNames, uniqueStrings } from './util';
@@ -28,6 +31,32 @@ import { ApiFail, isIsoDate, isRecord, normalizeNames, uniqueStrings } from './u
 const PERIODS = new Set<string>(PERIOD_OPTIONS.map((p) => p.value));
 const CADENCES = new Set<string>(['weekly', 'biweekly', 'monthly', 'quarterly', 'annual']);
 const AI_PROVIDERS = new Set<string>(['off', 'workers-ai', 'anthropic']);
+const BRIEFING_CADENCES = new Set<string>(['daily', 'weekly']);
+
+/**
+ * The WhatsApp Cloud API addresses recipients as E.164 digits WITHOUT the
+ * leading '+' (e.g. '15551234567'). Empty clears the recipient. Exported pure
+ * so the validation decisions are testable without a DB.
+ */
+export function normalizeBriefingRecipient(raw: unknown): string {
+  const value = typeof raw === 'string' ? raw.trim() : null;
+  if (value === null || (value !== '' && !/^\d{6,15}$/.test(value))) {
+    throw new ApiFail(
+      400,
+      'briefingWhatsappRecipient must be 6-15 digits (country code first, no +), or empty to clear it.',
+    );
+  }
+  return value;
+}
+
+/** The Meta app's phone number ID — an opaque numeric id, or empty to clear. */
+export function normalizeBriefingPhoneNumberId(raw: unknown): string {
+  const value = typeof raw === 'string' ? raw.trim() : null;
+  if (value === null || (value !== '' && !/^\d+$/.test(value))) {
+    throw new ApiFail(400, 'briefingWhatsappPhoneNumberId must be digits only, or empty to clear it.');
+  }
+  return value;
+}
 
 /**
  * What to do with the BYOK key this request. Kept separate from the settings
@@ -261,6 +290,50 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
     }
   }
 
+  // Proactive briefings (sprint 7). `briefingWhatsappTokenSet` is derived in
+  // readSettings and simply ignored if a client echoes it back.
+  if ('briefingsEnabled' in body) {
+    if (typeof body.briefingsEnabled !== 'boolean') {
+      throw new ApiFail(400, 'briefingsEnabled must be true or false.');
+    }
+    patch.briefingsEnabled = body.briefingsEnabled;
+  }
+  if ('briefingCadence' in body) {
+    const cadence = typeof body.briefingCadence === 'string' ? body.briefingCadence : '';
+    if (!BRIEFING_CADENCES.has(cadence)) {
+      throw new ApiFail(400, 'briefingCadence must be daily or weekly.');
+    }
+    patch.briefingCadence = cadence as BriefingCadence;
+  }
+  if ('briefingWhatsappRecipient' in body) {
+    patch.briefingWhatsappRecipient = normalizeBriefingRecipient(body.briefingWhatsappRecipient);
+  }
+  if ('briefingWhatsappPhoneNumberId' in body) {
+    patch.briefingWhatsappPhoneNumberId = normalizeBriefingPhoneNumberId(
+      body.briefingWhatsappPhoneNumberId,
+    );
+  }
+  // Server-stamped on successful delivery only — a client that could set or
+  // clear it could spoof the cadence gate, so the field is rejected loudly
+  // rather than silently dropped.
+  if ('lastBriefingSentAt' in body) {
+    throw new ApiFail(400, 'lastBriefingSentAt is set by the server and cannot be updated here.');
+  }
+  // The Cloud API token mirrors aiApiKey exactly: write-only, own row, never
+  // echoed, never quoted in an error message.
+  let briefingTokenAction: KeyAction | null = null;
+  if ('briefingWhatsappToken' in body) {
+    if (body.briefingWhatsappToken === null) briefingTokenAction = { type: 'clear' };
+    else if (typeof body.briefingWhatsappToken === 'string' && body.briefingWhatsappToken.trim()) {
+      briefingTokenAction = { type: 'set', value: body.briefingWhatsappToken.trim() };
+    } else {
+      throw new ApiFail(
+        400,
+        'briefingWhatsappToken must be a non-empty token, or null to remove the stored token.',
+      );
+    }
+  }
+
   // Tags and rules live in their own tables; everything else is a settings row.
   const tagList = 'tags' in body ? names(body.tags, 'tags') : null;
   const ruleList = 'rules' in body ? normalizeRules(body.rules) : null;
@@ -268,6 +341,11 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
   await writeSettings(db, patch);
   if (keyAction?.type === 'set') await writeAiApiKey(db, keyAction.value);
   else if (keyAction?.type === 'clear') await clearAiApiKey(db);
+  if (briefingTokenAction?.type === 'set') {
+    await writeBriefingWhatsappToken(db, briefingTokenAction.value);
+  } else if (briefingTokenAction?.type === 'clear') {
+    await clearBriefingWhatsappToken(db);
+  }
   if (tagList) await syncTags(db, tagList);
   if (ruleList) await replaceRules(db, ruleList);
 
