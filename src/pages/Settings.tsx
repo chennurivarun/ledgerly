@@ -1,15 +1,29 @@
 // Settings page (spec §16) — display currency, net worth setup, managed
 // categories/tags/accounts, automatic detection controls, Drive sync status,
 // and the danger zone.
-import { AlertTriangle, Coins, ExternalLink, FolderSync, Radar, RotateCcw, Sparkles, Wallet } from 'lucide-react';
+import { AlertTriangle, Coins, ExternalLink, FolderSync, MessageCircle, Radar, RotateCcw, Sparkles, Wallet } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { fmtCurrency } from '../../shared/format';
-import type { AiProvider } from '../../shared/types';
+import type { AiProvider, BriefingCadence } from '../../shared/types';
+import type { BriefingPreview } from '../api';
 import { CurrencySelect } from '../components/CurrencySelect';
 import { ManagedListSection } from '../components/manage/ManagedListSection';
 import { StatusBadge } from '../components/manage/StatusBadge';
+import { Toggle } from '../components/manage/Toggle';
 import { useDriveSync } from '../components/manage/useDriveSync';
 import { WipeDataModal } from '../components/manage/WipeDataModal';
+import {
+  buildBriefingToggleUpdate,
+  buildCadenceUpdate,
+  buildDeliveryUpdate,
+  buildTokenUpdate,
+  briefingSentMessage,
+  canSendTestBriefing,
+  deliveryDirty,
+  digitsOnly,
+  lastBriefingLabel,
+  type BriefingSettingsUpdate,
+} from '../components/settings/briefingHelpers';
 import { useStore } from '../store';
 import { Button, Card, EmptyState, Field, InlineError, Input, SegmentedControl, Spinner } from '../components/ui';
 
@@ -27,6 +41,8 @@ export default function Settings() {
   const settings = useStore((s) => s.settings);
   const tags = useStore((s) => s.tags);
   const updatePreferences = useStore((s) => s.updatePreferences);
+  const previewBriefing = useStore((s) => s.previewBriefing);
+  const sendBriefing = useStore((s) => s.sendBriefing);
   const wipeAll = useStore((s) => s.wipeAll);
   const toast = useStore((s) => s.toast);
   const drive = useDriveSync();
@@ -66,6 +82,41 @@ export default function Settings() {
         onSaveModel={async (model) => {
           await updatePreferences({ aiModel: model });
           toast('success', 'Model override saved.');
+        }}
+      />
+
+      <BriefingsSection
+        enabled={settings.briefingsEnabled}
+        cadence={settings.briefingCadence}
+        recipient={settings.briefingWhatsappRecipient}
+        phoneNumberId={settings.briefingWhatsappPhoneNumberId}
+        tokenSet={settings.briefingWhatsappTokenSet}
+        lastSentAt={settings.lastBriefingSentAt}
+        onToggle={async (next) => {
+          await updatePreferences(buildBriefingToggleUpdate(next));
+          toast('success', next ? 'Briefings enabled.' : 'Briefings disabled.');
+        }}
+        onSaveCadence={async (cadence) => {
+          await updatePreferences(buildCadenceUpdate(cadence));
+          toast('success', 'Briefing cadence updated.');
+        }}
+        onSaveDelivery={async (recipientDraft, phoneNumberIdDraft) => {
+          await updatePreferences(buildDeliveryUpdate(recipientDraft, phoneNumberIdDraft));
+          toast('success', 'Delivery settings saved.');
+        }}
+        onSaveToken={async (update) => {
+          await updatePreferences(update);
+          toast(
+            'success',
+            update.briefingWhatsappToken === null ? 'Access token removed.' : 'Access token saved.',
+          );
+        }}
+        onPreview={() => previewBriefing()}
+        onSendTest={async () => {
+          // sendBriefing reads nothing client-side — the server validates the
+          // SAVED config at call time and its error message surfaces inline.
+          const res = await sendBriefing();
+          toast('success', briefingSentMessage(res.sentTo));
         }}
       />
 
@@ -583,6 +634,343 @@ function AiSection({
               )}
             </div>
           )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+const BRIEFING_CADENCE_OPTIONS: { value: BriefingCadence; label: string }[] = [
+  { value: 'daily', label: 'Daily' },
+  { value: 'weekly', label: 'Weekly' },
+];
+
+function BriefingsSection({
+  enabled,
+  cadence,
+  recipient,
+  phoneNumberId,
+  tokenSet,
+  lastSentAt,
+  onToggle,
+  onSaveCadence,
+  onSaveDelivery,
+  onSaveToken,
+  onPreview,
+  onSendTest,
+}: {
+  enabled: boolean;
+  cadence: BriefingCadence;
+  recipient: string;
+  phoneNumberId: string;
+  tokenSet: boolean;
+  lastSentAt: string | null;
+  onToggle: (next: boolean) => Promise<void>;
+  onSaveCadence: (next: BriefingCadence) => Promise<void>;
+  onSaveDelivery: (recipientDraft: string, phoneNumberIdDraft: string) => Promise<void>;
+  onSaveToken: (update: BriefingSettingsUpdate) => Promise<void>;
+  onPreview: () => Promise<BriefingPreview>;
+  onSendTest: () => Promise<void>;
+}) {
+  const [togglePending, setTogglePending] = useState<boolean | null>(null);
+  const [toggleError, setToggleError] = useState<string | null>(null);
+
+  const [cadencePending, setCadencePending] = useState<BriefingCadence | null>(null);
+  const [cadenceError, setCadenceError] = useState<string | null>(null);
+
+  const [recipientDraft, setRecipientDraft] = useState(recipient);
+  const [phoneIdDraft, setPhoneIdDraft] = useState(phoneNumberId);
+  const [deliveryBusy, setDeliveryBusy] = useState(false);
+  const [deliveryError, setDeliveryError] = useState<string | null>(null);
+
+  const [tokenDraft, setTokenDraft] = useState('');
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+
+  // Preview and test-send share ONE in-flight slot — a single briefing
+  // action at a time; both buttons disable while either is running.
+  const [actionBusy, setActionBusy] = useState<'preview' | 'send' | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [previewText, setPreviewText] = useState<string | null>(null);
+
+  // Saved values can change under the drafts (save from elsewhere, or a
+  // danger-zone wipe resetting them) — resync, same as the AI model draft.
+  useEffect(() => {
+    setRecipientDraft(recipient);
+  }, [recipient]);
+  useEffect(() => {
+    setPhoneIdDraft(phoneNumberId);
+  }, [phoneNumberId]);
+
+  const activeEnabled = togglePending ?? enabled;
+  const activeCadence = cadencePending ?? cadence;
+  const anyBusy =
+    togglePending !== null ||
+    cadencePending !== null ||
+    deliveryBusy ||
+    tokenBusy ||
+    actionBusy !== null;
+
+  // null = blank draft with nothing stored, i.e. nothing to save.
+  const tokenUpdate = buildTokenUpdate(tokenDraft, tokenSet);
+  const dirty = deliveryDirty(
+    { recipient: recipientDraft, phoneNumberId: phoneIdDraft },
+    { recipient, phoneNumberId },
+  );
+  // Eligibility comes from CURRENT SAVED settings only — unsaved edits in the
+  // fields above don't count until saved. The server re-validates on send.
+  const canSend = canSendTestBriefing({
+    briefingsEnabled: enabled,
+    briefingWhatsappRecipient: recipient,
+    briefingWhatsappPhoneNumberId: phoneNumberId,
+    briefingWhatsappTokenSet: tokenSet,
+  });
+  const lastSentLabel = lastBriefingLabel(lastSentAt);
+
+  async function handleToggle(next: boolean) {
+    if (next === enabled || anyBusy) return;
+    setTogglePending(next);
+    setToggleError(null);
+    try {
+      await onToggle(next);
+    } catch (e) {
+      setToggleError(e instanceof Error ? e.message : 'Could not save. Try again.');
+    } finally {
+      setTogglePending(null);
+    }
+  }
+
+  async function handleCadenceChange(next: BriefingCadence) {
+    if (next === cadence || anyBusy) return;
+    setCadencePending(next);
+    setCadenceError(null);
+    try {
+      await onSaveCadence(next);
+    } catch (e) {
+      setCadenceError(e instanceof Error ? e.message : 'Could not save. Try again.');
+    } finally {
+      setCadencePending(null);
+    }
+  }
+
+  async function handleSaveDelivery() {
+    setDeliveryBusy(true);
+    setDeliveryError(null);
+    try {
+      await onSaveDelivery(recipientDraft, phoneIdDraft);
+    } catch (e) {
+      setDeliveryError(e instanceof Error ? e.message : 'Could not save. Try again.');
+    } finally {
+      setDeliveryBusy(false);
+    }
+  }
+
+  async function handleSaveToken() {
+    if (!tokenUpdate) return;
+    setTokenBusy(true);
+    setTokenError(null);
+    try {
+      await onSaveToken(tokenUpdate);
+      setTokenDraft('');
+    } catch (e) {
+      setTokenError(e instanceof Error ? e.message : 'Could not save the token. Try again.');
+    } finally {
+      setTokenBusy(false);
+    }
+  }
+
+  async function handlePreview() {
+    setActionBusy('preview');
+    setActionError(null);
+    try {
+      const res = await onPreview();
+      setPreviewText(res.text);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Could not build the preview. Try again.');
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function handleSendTest() {
+    setActionBusy('send');
+    setActionError(null);
+    try {
+      await onSendTest();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Could not send the briefing. Try again.');
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  return (
+    <Card title="Briefings">
+      <div className="flex items-start gap-3">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
+          <MessageCircle className="size-5" aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1 space-y-4">
+          <p className="text-sm text-muted">
+            A plain-text digest of your last seven days of transactions, the next seven days of
+            forecast projections, and anything waiting for your review — delivered to WhatsApp on
+            the cadence you choose.
+          </p>
+
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-medium">Enable briefings</p>
+            <Toggle
+              checked={activeEnabled}
+              onChange={(next) => void handleToggle(next)}
+              label="Enable briefings"
+              disabled={anyBusy}
+            />
+          </div>
+          {togglePending !== null && (
+            <p className="flex items-center gap-1.5 text-xs text-muted">
+              <Spinner className="size-3.5" /> Saving…
+            </p>
+          )}
+          <InlineError message={toggleError} />
+
+          {activeEnabled && (
+            <div>
+              <div className={anyBusy ? 'pointer-events-none opacity-60' : ''}>
+                <SegmentedControl
+                  ariaLabel="Briefing cadence"
+                  options={BRIEFING_CADENCE_OPTIONS}
+                  value={activeCadence}
+                  onChange={(v) => void handleCadenceChange(v)}
+                />
+              </div>
+              {cadencePending !== null && (
+                <p className="mt-2 flex items-center gap-1.5 text-xs text-muted">
+                  <Spinner className="size-3.5" /> Saving…
+                </p>
+              )}
+              <InlineError message={cadenceError} />
+            </div>
+          )}
+
+          {/*
+            Delivery config shows while briefings are on OR any credential/
+            value is stored — a stored token must be removable without
+            re-enabling briefings first (same principle as the AI key).
+          */}
+          {(activeEnabled || recipient !== '' || phoneNumberId !== '' || tokenSet) && (
+            <div className="space-y-4 border-t border-border pt-4">
+              <p className="rounded-xl border border-border bg-canvas px-3 py-2.5 text-xs text-muted">
+                Delivery uses your own Meta WhatsApp Business Cloud API app — see the{' '}
+                <a
+                  href="https://developers.facebook.com/docs/whatsapp/cloud-api/get-started"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-accent hover:underline"
+                >
+                  getting-started guide
+                </a>
+                . A Meta app in development mode can only message its registered test numbers.
+                Briefings are generated from your data on your server and sent directly from it to
+                Meta — no other party is involved.
+              </p>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="WhatsApp recipient" hint="Country code + number, digits only.">
+                  <Input
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={recipientDraft}
+                    disabled={anyBusy}
+                    onChange={(e) => setRecipientDraft(digitsOnly(e.target.value))}
+                    placeholder="15551234567"
+                  />
+                </Field>
+                <Field label="Phone number ID">
+                  <Input
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={phoneIdDraft}
+                    disabled={anyBusy}
+                    onChange={(e) => setPhoneIdDraft(digitsOnly(e.target.value))}
+                  />
+                </Field>
+              </div>
+              <div className="flex justify-end">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={anyBusy || !dirty}
+                  loading={deliveryBusy}
+                  onClick={() => void handleSaveDelivery()}
+                >
+                  Save delivery settings
+                </Button>
+              </div>
+              <InlineError message={deliveryError} />
+
+              <div>
+                <Field label="Cloud API access token">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Input
+                      type="password"
+                      autoComplete="off"
+                      value={tokenDraft}
+                      disabled={anyBusy}
+                      onChange={(e) => setTokenDraft(e.target.value)}
+                      placeholder="EAA…"
+                      className="max-w-xs"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={anyBusy || tokenUpdate === null}
+                      loading={tokenBusy}
+                      onClick={() => void handleSaveToken()}
+                    >
+                      Save token
+                    </Button>
+                  </div>
+                  <p className="mt-1.5 text-xs text-muted">
+                    {tokenSet
+                      ? 'Stored — enter a new token to replace it, or clear to remove.'
+                      : 'Write-only — once saved, the token itself is never shown again.'}
+                  </p>
+                </Field>
+                <InlineError message={tokenError} />
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-3 border-t border-border pt-4">
+            {/* Preview needs ZERO WhatsApp config — it only renders the text. */}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={anyBusy}
+                loading={actionBusy === 'preview'}
+                onClick={() => void handlePreview()}
+              >
+                Preview briefing
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={anyBusy || !canSend}
+                loading={actionBusy === 'send'}
+                onClick={() => void handleSendTest()}
+              >
+                Send test briefing
+              </Button>
+            </div>
+            <InlineError message={actionError} />
+            {previewText !== null && (
+              <pre className="overflow-x-auto whitespace-pre-wrap rounded-xl border border-border bg-canvas px-3 py-2.5 font-mono text-xs">
+                {previewText}
+              </pre>
+            )}
+            {lastSentLabel && <p className="text-xs text-muted">{lastSentLabel}</p>}
+          </div>
         </div>
       </div>
     </Card>
