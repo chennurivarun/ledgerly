@@ -32,6 +32,7 @@ import {
 const PROVIDER_LABEL: Record<string, string> = {
   'workers-ai': 'Workers AI',
   anthropic: 'Anthropic',
+  sarvam: 'Sarvam',
 };
 
 const TYPE_OPTIONS: { value: TxType; label: string }[] = [

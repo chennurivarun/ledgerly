@@ -12,11 +12,18 @@ import {
   type InboxEmail,
   type StatementExtraction,
   type StatementJobStatus,
+  type StatementPreflight,
   type UploadResult,
 } from '../../shared/types';
 import { api } from '../api';
 import { ExtractionReviewModal } from '../components/ai/ExtractionReviewModal';
 import { isDocumentExtractable } from '../components/ai/extractionHelpers';
+import {
+  missingKeyProvider,
+  preflightCostLine,
+  preflightSummary,
+  providerCanReadPdfStatements,
+} from '../components/ai/preflightHelpers';
 import { StatementReviewModal } from '../components/ai/StatementReviewModal';
 import { InboxConfirmModal } from '../components/inbox/InboxConfirmModal';
 import { InboxSection } from '../components/inbox/InboxSection';
@@ -128,9 +135,11 @@ export default function Documents() {
   const inboxEmails = useStore((s) => s.inboxEmails);
   const aiProvider = useStore((s) => s.settings.aiProvider);
   const aiKeySet = useStore((s) => s.settings.aiKeySet);
+  const sarvamKeySet = useStore((s) => s.settings.sarvamKeySet);
   const emailFeedEnabled = useStore((s) => s.settings.emailFeedEnabled);
   const uploadDocuments = useStore((s) => s.uploadDocuments);
   const extractDocument = useStore((s) => s.extractDocument);
+  const statementPreflight = useStore((s) => s.statementPreflight);
   const extractStatement = useStore((s) => s.extractStatement);
   const dismissInboxEmail = useStore((s) => s.dismissInboxEmail);
   const refreshQuiet = useStore((s) => s.refreshQuiet);
@@ -157,6 +166,12 @@ export default function Documents() {
   // transient surface (this), no redundant toast on top of either.
   const [extractError, setExtractError] = useState<{ id: string; message: string } | null>(null);
   const [statementError, setStatementError] = useState<{ id: string; message: string } | null>(null);
+  // Preflight gate (sprint 10): a statement read spends real money, so the
+  // statement button first fetches what the read will involve (pages, batch
+  // count, honest cost) and asks — nothing reaches a model until the user
+  // confirms in the dialog this state opens. Holds the DocumentMeta by value
+  // so confirm targets exactly the document the dialog described.
+  const [preflight, setPreflight] = useState<{ doc: DocumentMeta; data: StatementPreflight } | null>(null);
   // Single slot for whichever review modal is open (extraction, statement,
   // or a mail-in inbox confirm) — one `kind` field means an auto-open from
   // either AI flow can check "is anything at all already open" with one
@@ -169,10 +184,12 @@ export default function Documents() {
   const [inboxDismissing, setInboxDismissing] = useState<string | null>(null);
 
   const aiOn = aiProvider !== 'off';
-  // Anthropic without a stored key can't actually extract anything — treat
-  // it as not-ready rather than offering a button that will just fail.
-  const keyMissing = aiProvider === 'anthropic' && !aiKeySet;
-  const aiReady = aiOn && !keyMissing;
+  // A BYOK provider (Anthropic or Sarvam) without its stored key can't
+  // actually extract anything — treat it as not-ready rather than offering a
+  // button that will just fail. The helper names which key is missing so the
+  // banner below can say so.
+  const missingKey = missingKeyProvider(aiProvider, aiKeySet, sarvamKeySet);
+  const aiReady = aiOn && missingKey === null;
 
   async function handleExtract(doc: DocumentMeta) {
     setRunning({ id: doc.id, kind: 'extract' });
@@ -192,6 +209,27 @@ export default function Documents() {
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Could not extract that document.';
       setExtractError({ id: doc.id, message });
+    } finally {
+      setRunning(null);
+    }
+  }
+
+  // Step 1 of a statement read: fetch the free preflight and open the
+  // confirm dialog. Reuses the `running` slot (kind 'statement') so the row
+  // button shows loading and every other action stays disabled while the
+  // check is in flight — same one-in-flight discipline as the run itself.
+  // Preflight errors (400s, e.g. an encrypted PDF the backend refuses to
+  // guess passwords for) land in the same per-row transient slot as a failed
+  // run — one error surface, no dialog opens.
+  async function handleStatementPreflight(doc: DocumentMeta) {
+    setRunning({ id: doc.id, kind: 'statement' });
+    setStatementError(null);
+    try {
+      const data = await statementPreflight(doc.id);
+      setPreflight({ doc, data });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Could not check that statement.';
+      setStatementError({ id: doc.id, message });
     } finally {
       setRunning(null);
     }
@@ -229,7 +267,10 @@ export default function Documents() {
   const hasPending =
     extractions.some((e) => e.status === 'pending') || statements.some((s) => s.status === 'pending');
   useEffect(() => {
-    if (!hasPending || reviewing) return;
+    // Paused for the preflight dialog too — it's a modal like the reviews,
+    // and a poll-driven re-render would hand its ConfirmDialog a fresh
+    // onClose identity, re-running the frozen Modal's focus effect.
+    if (!hasPending || reviewing || preflight) return;
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout>;
     // Re-arm only after the previous refresh settles, so a slow request
@@ -244,7 +285,7 @@ export default function Documents() {
       cancelled = true;
       clearTimeout(timeoutId);
     };
-  }, [hasPending, reviewing, refreshQuiet]);
+  }, [hasPending, reviewing, preflight, refreshQuiet]);
 
   // Stable identity across re-renders (setReviewing from useState never
   // changes) — passed to whichever modal is open so its internal onClose
@@ -286,6 +327,18 @@ export default function Documents() {
       );
     }
   }, [reviewing, documents, inboxEmails, toast]);
+
+  // Same defensive cleanup for the preflight dialog: if its document
+  // vanishes (deleted, or dropped by a background refresh), close the dialog
+  // and say why rather than letting "Read statement" fire at a document that
+  // no longer exists.
+  useEffect(() => {
+    if (!preflight) return;
+    if (!documents.some((d) => d.id === preflight.doc.id)) {
+      setPreflight(null);
+      toast('error', 'That statement is no longer available.');
+    }
+  }, [preflight, documents, toast]);
 
   async function handleInboxDismiss(item: InboxEmail) {
     setInboxDismissing(item.id);
@@ -473,25 +526,27 @@ export default function Documents() {
           </Link>
         </div>
       )}
-      {aiOn && keyMissing && (
-        // Anthropic selected but no key stored yet — extraction can't run,
-        // so don't offer buttons that would just fail; point at Settings.
+      {aiOn && missingKey !== null && (
+        // A BYOK provider selected but its key not stored yet — extraction
+        // can't run, so don't offer buttons that would just fail; point at
+        // Settings, naming the key that's missing.
         <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">
           <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
-          <span>Add your Anthropic key in Settings to start extracting.</span>
+          <span>Add your {missingKey} key in Settings to start extracting.</span>
           <Link to="/settings" className="font-medium text-accent hover:underline">
             Go to Settings
           </Link>
         </div>
       )}
-      {aiReady && aiProvider === 'workers-ai' && documents.some((d) => d.mimeType === 'application/pdf') && (
+      {aiReady && !providerCanReadPdfStatements(aiProvider) && documents.some((d) => d.mimeType === 'application/pdf') && (
         // Shown once for the whole vault (same convention as the two
         // banners above), not per row — every PDF's "Read as statement"
         // button is disabled for the same reason, so repeating it on each
-        // row would just be noise.
+        // row would just be noise. With aiReady true this only ever fires
+        // for Workers AI, so naming it stays honest.
         <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">
           <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
-          <span>PDF statements need the Anthropic provider — Workers AI can&apos;t read them.</span>
+          <span>PDF statements need the Anthropic or Sarvam provider — Workers AI can&apos;t read them.</span>
           <Link to="/settings" className="font-medium text-accent hover:underline">
             Switch in Settings
           </Link>
@@ -543,9 +598,10 @@ export default function Documents() {
                 (statement.status === 'suggested' || statement.status === 'partial') &&
                 proposedCount > 0;
               // Ready like Extract, plus PDF-only — but the backend rejects
-              // Workers AI for PDFs, so a workers-ai user still sees the
-              // button (not hidden) with a disabled state and an honest
-              // reason, rather than a click that just fails server-side.
+              // Workers AI for PDFs (Anthropic and Sarvam both read them),
+              // so a workers-ai user still sees the button (not hidden) with
+              // a disabled state and an honest reason, rather than a click
+              // that just fails server-side.
               // Also covers the dead-end where a job landed in
               // 'suggested'/'partial' with zero proposed rows — a real
               // outcome (a PDF with no readable table, rows pruned, or
@@ -557,7 +613,8 @@ export default function Documents() {
                 (!statement ||
                   STATEMENT_REEXTRACTABLE_STATUSES.includes(statement.status) ||
                   ((statement.status === 'suggested' || statement.status === 'partial') && proposedCount === 0));
-              const statementBlockedByProvider = showStatementAction && aiProvider === 'workers-ai';
+              const statementBlockedByProvider =
+                showStatementAction && !providerCanReadPdfStatements(aiProvider);
               return (
                 <li key={doc.id} className="flex flex-wrap items-center gap-3 py-3">
                   <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
@@ -636,8 +693,8 @@ export default function Documents() {
                         statementBlockedByProvider ||
                         (running !== null && !(running.id === doc.id && running.kind === 'statement'))
                       }
-                      title={statementBlockedByProvider ? 'PDF statements need the Anthropic provider' : undefined}
-                      onClick={() => void handleReadStatement(doc)}
+                      title={statementBlockedByProvider ? 'PDF statements need the Anthropic or Sarvam provider' : undefined}
+                      onClick={() => void handleStatementPreflight(doc)}
                     >
                       <Sparkles className="size-3.5" aria-hidden />
                       {statementButtonLabel(statement)}
@@ -666,6 +723,39 @@ export default function Documents() {
           </ul>
         )}
       </Card>
+
+      {preflight &&
+        (() => {
+          const costLine = preflightCostLine(preflight.data);
+          return (
+            // key={doc.id} forces a full remount when the dialog moves to a
+            // different document (same keyed-remount discipline as the
+            // review modals); the doc held by value means confirm can never
+            // target anything but the document these numbers describe. On
+            // confirm the dialog closes immediately and the existing
+            // handleReadStatement flow takes over unchanged — its `running`
+            // slot, claim semantics, and auto-open of the review modal are
+            // exactly what they were before the preflight step existed.
+            <ConfirmDialog
+              key={preflight.doc.id}
+              title={`Read "${preflight.doc.filename}" as a statement?`}
+              tone="primary"
+              confirmLabel="Read statement"
+              message={
+                <>
+                  <p>{preflightSummary(preflight.data)}</p>
+                  {costLine && <p>{costLine}</p>}
+                </>
+              }
+              onConfirm={() => {
+                const doc = preflight.doc;
+                setPreflight(null);
+                void handleReadStatement(doc);
+              }}
+              onCancel={() => setPreflight(null)}
+            />
+          );
+        })()}
 
       {pendingDelete && (
         <ConfirmDialog

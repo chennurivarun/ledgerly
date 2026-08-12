@@ -32,6 +32,7 @@ import {
   senderEntryError,
   showEmptyAllowlistWarning,
 } from '../components/inbox/inboxHelpers';
+import { parseSarvamPriceDraft, sarvamPriceError } from '../components/ai/preflightHelpers';
 import { useStore } from '../store';
 import { Button, Card, EmptyState, Field, InlineError, Input, SegmentedControl, Spinner } from '../components/ui';
 
@@ -75,6 +76,8 @@ export default function Settings() {
         provider={settings.aiProvider}
         model={settings.aiModel}
         keySet={settings.aiKeySet}
+        sarvamKeySet={settings.sarvamKeySet}
+        sarvamPrice={settings.sarvamPricePerPage}
         onSaveProvider={async (provider) => {
           await updatePreferences({ aiProvider: provider });
           toast('success', 'AI provider updated.');
@@ -86,6 +89,18 @@ export default function Settings() {
         onRemoveKey={async () => {
           await updatePreferences({ aiApiKey: null });
           toast('success', 'API key removed.');
+        }}
+        onSaveSarvamKey={async (key) => {
+          await updatePreferences({ sarvamApiKey: key });
+          toast('success', 'API key saved.');
+        }}
+        onRemoveSarvamKey={async () => {
+          await updatePreferences({ sarvamApiKey: null });
+          toast('success', 'API key removed.');
+        }}
+        onSaveSarvamPrice={async (price) => {
+          await updatePreferences({ sarvamPricePerPage: price });
+          toast('success', price === null ? 'Price per page cleared.' : 'Price per page saved.');
         }}
         onSaveModel={async (model) => {
           await updatePreferences({ aiModel: model });
@@ -400,6 +415,7 @@ const AI_PROVIDER_OPTIONS: { value: AiProvider; label: string }[] = [
   { value: 'off', label: 'Off' },
   { value: 'workers-ai', label: 'Workers AI' },
   { value: 'anthropic', label: 'Anthropic (BYOK)' },
+  { value: 'sarvam', label: 'Sarvam (BYOK)' },
 ];
 
 const AI_PROVIDER_COPY: Record<AiProvider, string> = {
@@ -425,17 +441,27 @@ function AiSection({
   provider,
   model,
   keySet,
+  sarvamKeySet,
+  sarvamPrice,
   onSaveProvider,
   onSaveKey,
   onRemoveKey,
+  onSaveSarvamKey,
+  onRemoveSarvamKey,
+  onSaveSarvamPrice,
   onSaveModel,
 }: {
   provider: AiProvider;
   model: string | null;
   keySet: boolean;
+  sarvamKeySet: boolean;
+  sarvamPrice: number | null;
   onSaveProvider: (provider: AiProvider) => Promise<void>;
   onSaveKey: (key: string) => Promise<void>;
   onRemoveKey: () => Promise<void>;
+  onSaveSarvamKey: (key: string) => Promise<void>;
+  onRemoveSarvamKey: () => Promise<void>;
+  onSaveSarvamPrice: (price: number | null) => Promise<void>;
   onSaveModel: (model: string | null) => Promise<void>;
 }) {
   const [providerPending, setProviderPending] = useState<AiProvider | null>(null);
@@ -446,6 +472,17 @@ function AiSection({
   const [keyBusy, setKeyBusy] = useState<'save' | 'remove' | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
 
+  // Sarvam key management — the exact same write-only pattern as the
+  // Anthropic key above, just wired to the sarvamApiKey preference field.
+  const [sarvamKeyInputOpen, setSarvamKeyInputOpen] = useState(!sarvamKeySet);
+  const [sarvamKeyDraft, setSarvamKeyDraft] = useState('');
+  const [sarvamKeyBusy, setSarvamKeyBusy] = useState<'save' | 'remove' | null>(null);
+  const [sarvamKeyError, setSarvamKeyError] = useState<string | null>(null);
+
+  const [priceDraft, setPriceDraft] = useState(sarvamPrice !== null ? String(sarvamPrice) : '');
+  const [priceBusy, setPriceBusy] = useState(false);
+  const [priceError, setPriceError] = useState<string | null>(null);
+
   const [modelDraft, setModelDraft] = useState(model ?? '');
   const [modelBusy, setModelBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
@@ -455,20 +492,32 @@ function AiSection({
   useEffect(() => {
     if (!keySet) setKeyInputOpen(true);
   }, [keySet]);
+  useEffect(() => {
+    if (!sarvamKeySet) setSarvamKeyInputOpen(true);
+  }, [sarvamKeySet]);
 
   // Keep the model draft in sync with the saved value (e.g. after a save
-  // elsewhere, or a danger-zone wipe resetting it to null).
+  // elsewhere, or a danger-zone wipe resetting it to null). Same for the
+  // saved Sarvam per-page price.
   useEffect(() => {
     setModelDraft(model ?? '');
   }, [model]);
+  useEffect(() => {
+    setPriceDraft(sarvamPrice !== null ? String(sarvamPrice) : '');
+  }, [sarvamPrice]);
 
   const activeProvider = providerPending ?? provider;
-  const anyBusy = providerPending !== null || keyBusy !== null || modelBusy;
+  const anyBusy =
+    providerPending !== null || keyBusy !== null || sarvamKeyBusy !== null || priceBusy || modelBusy;
 
   // A half-typed key left over from browsing the Anthropic tab must not
   // linger once the user switches away — clear the draft, not the saved key.
+  // Same rule for a half-typed Sarvam key.
   useEffect(() => {
     if (activeProvider !== 'anthropic') setKeyDraft('');
+  }, [activeProvider]);
+  useEffect(() => {
+    if (activeProvider !== 'sarvam') setSarvamKeyDraft('');
   }, [activeProvider]);
 
   async function handleProviderChange(next: AiProvider) {
@@ -511,6 +560,53 @@ function AiSection({
       setKeyError(e instanceof Error ? e.message : 'Could not remove the key. Try again.');
     } finally {
       setKeyBusy(null);
+    }
+  }
+
+  async function handleSaveSarvamKey() {
+    if (!sarvamKeyDraft.trim()) {
+      setSarvamKeyError('Enter an API key.');
+      return;
+    }
+    setSarvamKeyBusy('save');
+    setSarvamKeyError(null);
+    try {
+      await onSaveSarvamKey(sarvamKeyDraft.trim());
+      setSarvamKeyDraft('');
+      setSarvamKeyInputOpen(false);
+    } catch (e) {
+      setSarvamKeyError(e instanceof Error ? e.message : 'Could not save the key. Try again.');
+    } finally {
+      setSarvamKeyBusy(null);
+    }
+  }
+
+  async function handleRemoveSarvamKey() {
+    setSarvamKeyBusy('remove');
+    setSarvamKeyError(null);
+    try {
+      await onRemoveSarvamKey();
+    } catch (e) {
+      setSarvamKeyError(e instanceof Error ? e.message : 'Could not remove the key. Try again.');
+    } finally {
+      setSarvamKeyBusy(null);
+    }
+  }
+
+  async function handleSavePrice() {
+    const invalid = sarvamPriceError(priceDraft);
+    if (invalid) {
+      setPriceError(invalid);
+      return;
+    }
+    setPriceBusy(true);
+    setPriceError(null);
+    try {
+      await onSaveSarvamPrice(parseSarvamPriceDraft(priceDraft));
+    } catch (e) {
+      setPriceError(e instanceof Error ? e.message : 'Could not save. Try again.');
+    } finally {
+      setPriceBusy(false);
     }
   }
 
@@ -563,11 +659,12 @@ function AiSection({
               (regardless of which provider is active — deleting a stored
               credential must never require re-enabling Anthropic first), or
               when Anthropic is active with no key yet (so there's a way to
-              add one).
+              add one). The Sarvam key block follows the same rule for its
+              own stored credential.
             - Model override shows for any provider except 'off' — Workers AI
               has an override too, just with Workers-AI-shaped model names.
           */}
-          {(keySet || activeProvider !== 'off') && (
+          {(keySet || sarvamKeySet || activeProvider !== 'off') && (
             <div className="space-y-4 border-t border-border pt-4">
               {(keySet || activeProvider === 'anthropic') && (
                 <div>
@@ -634,6 +731,112 @@ function AiSection({
                     </p>
                   </Field>
                   <InlineError message={keyError} />
+                </div>
+              )}
+
+              {(sarvamKeySet || activeProvider === 'sarvam') && (
+                <div>
+                  {activeProvider === 'sarvam' && !sarvamKeySet && (
+                    <p className="mb-2 text-xs font-medium text-caution">
+                      Add your Sarvam key below to start extracting.
+                    </p>
+                  )}
+                  <Field label="Sarvam API key">
+                    {!sarvamKeyInputOpen ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusBadge label="Key saved ✓" tone="positive" />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={anyBusy}
+                          onClick={() => setSarvamKeyInputOpen(true)}
+                        >
+                          Replace
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={anyBusy}
+                          loading={sarvamKeyBusy === 'remove'}
+                          onClick={() => void handleRemoveSarvamKey()}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          type="password"
+                          autoComplete="off"
+                          value={sarvamKeyDraft}
+                          disabled={anyBusy}
+                          onChange={(e) => setSarvamKeyDraft(e.target.value)}
+                          placeholder="API subscription key"
+                          className="max-w-xs"
+                        />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={anyBusy || !sarvamKeyDraft.trim()}
+                          loading={sarvamKeyBusy === 'save'}
+                          onClick={() => void handleSaveSarvamKey()}
+                        >
+                          Save key
+                        </Button>
+                        {sarvamKeySet && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={anyBusy}
+                            onClick={() => {
+                              setSarvamKeyInputOpen(false);
+                              setSarvamKeyDraft('');
+                              setSarvamKeyError(null);
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                    <p className="mt-1.5 text-xs text-muted">
+                      Write-only — once saved, the key itself is never shown again.
+                    </p>
+                  </Field>
+                  <InlineError message={sarvamKeyError} />
+                </div>
+              )}
+
+              {activeProvider === 'sarvam' && (
+                <div>
+                  <Field
+                    label="Price per page (optional)"
+                    hint="From your Sarvam dashboard, in your billing currency. Used only to estimate statement costs before a read — leave blank for no estimate."
+                  >
+                    <Input
+                      type="number"
+                      inputMode="decimal"
+                      min="0"
+                      step="any"
+                      value={priceDraft}
+                      disabled={anyBusy}
+                      onChange={(e) => setPriceDraft(e.target.value)}
+                      placeholder="0.50"
+                      className="max-w-xs"
+                    />
+                  </Field>
+                  <div className="mt-2 flex justify-end">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={anyBusy || priceDraft.trim() === (sarvamPrice !== null ? String(sarvamPrice) : '')}
+                      loading={priceBusy}
+                      onClick={() => void handleSavePrice()}
+                    >
+                      Save price
+                    </Button>
+                  </div>
+                  <InlineError message={priceError} />
                 </div>
               )}
 
