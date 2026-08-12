@@ -418,6 +418,16 @@ export interface StatementExtraction {
   createdAt: string;
   updatedAt: string;
   rows: StatementRow[];
+  /**
+   * Batch progress for a resumable read (sprint 12): done = batches that have
+   * reached a terminal state at the provider, total = batches submitted.
+   * Populated ONLY while status is 'pending' on a run that parked resumable
+   * provider state server-side (Sarvam's submit-then-tick flow); null for
+   * settled jobs, single-request providers (Anthropic), and legacy pending
+   * rows — so `progress !== null` is also the UI's signal that this pending
+   * job advances via ticks rather than a blocking request.
+   */
+  progress: { done: number; total: number } | null;
 }
 
 /** POST /api/documents/:id/statement/confirm — user-reviewed rows only. */

@@ -6,10 +6,40 @@
 import type {
   BatchInsertResult,
   StatementConfirmInput,
+  StatementExtraction,
   StatementRow,
   TxType,
 } from '../../../shared/types';
 import { amountCents, isLowConfidence, isRealDateISO, resolveCategorySuggestion } from './extractionHelpers';
+
+/**
+ * Status-chip copy for a resumable read in flight (sprint 12). `progress` is
+ * only ever non-null while a pending job is being advanced by ticks, so this
+ * returns null for every other job and the caller keeps its ordinary label.
+ * done+1 names the batch currently being read (batches are 1-indexed for
+ * humans); once every batch is terminal but the job has not settled yet, the
+ * honest label is "Finishing…" — never "Reading batch N+1 of N…".
+ */
+export function statementProgressLabel(
+  progress: { done: number; total: number } | null,
+): string | null {
+  if (!progress) return null;
+  if (progress.done >= progress.total) return 'Finishing…';
+  return `Reading batch ${progress.done + 1} of ${progress.total}…`;
+}
+
+/**
+ * The documents whose pending statement read advances via ticks — pending
+ * WITH progress means the server parked resumable provider state for it.
+ * A pending job without progress is a blocking (Anthropic) or legacy run:
+ * POSTing extract at it would just 409 against the in-flight claim, so the
+ * tick driver must leave it alone.
+ */
+export function resumableStatementIds(statements: readonly StatementExtraction[]): string[] {
+  return statements
+    .filter((s) => s.status === 'pending' && s.progress !== null)
+    .map((s) => s.documentId);
+}
 
 /** Local, per-row editable state held until the user confirms the batch. */
 export interface StatementRowDraft {

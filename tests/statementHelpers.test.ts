@@ -6,13 +6,21 @@ import {
   filterBySnapshot,
   isCleanOutcome,
   missingRowFields,
+  resumableStatementIds,
   rowLowConfidenceFields,
   seedStatementRowDraft,
   selectableRows,
+  statementProgressLabel,
   visibleLowConfidenceFields,
   type StatementRowDraft,
 } from '../src/components/ai/statementHelpers';
-import type { BatchInsertResult, ExtractedField, StatementRow, TxType } from '../shared/types';
+import type {
+  BatchInsertResult,
+  ExtractedField,
+  StatementExtraction,
+  StatementRow,
+  TxType,
+} from '../shared/types';
 
 function field<T>(value: T | null, confidence = 0.9): ExtractedField<T> {
   return { value, confidence };
@@ -429,5 +437,69 @@ describe('buildStatementConfirmInput', () => {
     const rows = [row({ id: 'row-1' })];
     const drafts = { 'row-1': draft({ type: '' }) };
     expect(() => buildStatementConfirmInput(rows, drafts, 'Main Checking')).toThrow(/row-1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resumable-read UI helpers (sprint 12)
+// ---------------------------------------------------------------------------
+
+function job(overrides: Partial<StatementExtraction> = {}): StatementExtraction {
+  return {
+    documentId: 'doc-1',
+    status: 'pending',
+    rowCount: 0,
+    truncated: false,
+    provider: 'sarvam',
+    model: 'sarvam-doc-ai',
+    error: null,
+    createdAt: '2026-08-13T10:00:00.000Z',
+    updatedAt: '2026-08-13T10:00:00.000Z',
+    rows: [],
+    progress: null,
+    ...overrides,
+  };
+}
+
+describe('statementProgressLabel — the pinned chip copy', () => {
+  it('names the batch being read, 1-indexed for humans', () => {
+    expect(statementProgressLabel({ done: 0, total: 3 })).toBe('Reading batch 1 of 3…');
+    expect(statementProgressLabel({ done: 2, total: 3 })).toBe('Reading batch 3 of 3…');
+    expect(statementProgressLabel({ done: 0, total: 1 })).toBe('Reading batch 1 of 1…');
+  });
+
+  it('done === total shows Finishing… — never "Reading batch N+1 of N…"', () => {
+    expect(statementProgressLabel({ done: 3, total: 3 })).toBe('Finishing…');
+    expect(statementProgressLabel({ done: 1, total: 1 })).toBe('Finishing…');
+  });
+
+  it('no progress → null, so pending chips without it keep their original copy', () => {
+    expect(statementProgressLabel(null)).toBeNull();
+  });
+});
+
+describe('resumableStatementIds — which pending jobs the tick driver advances', () => {
+  it('picks exactly the pending jobs that carry progress', () => {
+    const statements = [
+      job({ documentId: 'tick-me', progress: { done: 0, total: 2 } }),
+      // Pending WITHOUT progress is a blocking (anthropic) or legacy run —
+      // POSTing at it would just 409 against the in-flight claim.
+      job({ documentId: 'blocking-run', progress: null }),
+      job({ documentId: 'settled', status: 'suggested', progress: null }),
+      job({ documentId: 'also-tick', progress: { done: 1, total: 2 } }),
+    ];
+    expect(resumableStatementIds(statements)).toEqual(['tick-me', 'also-tick']);
+  });
+
+  it('a settled job with (stale) progress is never ticked — status gates first', () => {
+    expect(
+      resumableStatementIds([
+        job({ documentId: 'x', status: 'failed', progress: { done: 1, total: 2 } }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('empty in, empty out', () => {
+    expect(resumableStatementIds([])).toEqual([]);
   });
 });

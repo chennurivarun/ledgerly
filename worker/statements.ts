@@ -11,6 +11,7 @@ import {
   MAX_STATEMENT_ROWS,
   type AiProvider,
   type BatchInsertResult,
+  type Settings,
   type StatementExtraction,
   type StatementJobStatus,
   type StatementPreflight,
@@ -22,14 +23,22 @@ import {
   countPdfPages,
   emptyStatementRow,
   extractStatementFromDocument,
+  fetchSarvamJobRows,
+  isSarvamTerminal,
   lowestConfidence,
   MAX_SARVAM_PAGES_PER_JOB,
   normalizeStatementRows,
+  pollSarvamJobStatus,
+  requireSarvamKey,
   selectStatementProvider,
+  submitSarvamStatementJobs,
+  toStatementEnvelopeRow,
+  type SarvamDeps,
   type StatementRowFields,
+  type StatementRun,
 } from './ai';
 import { extractionInFlight, readDocumentRow } from './extractions';
-import { readSettings } from './settingsStore';
+import { readSarvamApiKey, readSettings } from './settingsStore';
 import {
   DEFAULT_ACCOUNT,
   existingFingerprints,
@@ -40,6 +49,11 @@ import { ApiFail, clip, isRecord } from './util';
 
 const JOB_COLUMNS =
   'documentId, status, rowCount, truncated, provider, model, error, createdAt, updatedAt';
+// providerState rides only the SELECTs: the INSERTs keep the original column
+// list (a fresh row's providerState is NULL by default) and every non-NULL
+// write goes through writeProviderState, so the resumable state has exactly
+// one writer and the Anthropic persistence path stays byte-identical.
+const JOB_SELECT_COLUMNS = `${JOB_COLUMNS}, providerState`;
 const ROW_COLUMNS =
   'id, documentId, idx, fields, status, duplicate, lowestConfidence, createdAt';
 
@@ -77,6 +91,7 @@ interface JobRow {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+  providerState: string | null;
 }
 
 interface RowRow {
@@ -88,6 +103,126 @@ interface RowRow {
   duplicate: number;
   lowestConfidence: number;
   createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Resumable provider state (sprint 12)
+//
+// Real Sarvam latency for dense statements exceeds any honest in-request poll
+// ceiling, and polling longer would blow the free plan's per-request
+// subrequest cap. So a Sarvam read is split in two: one SUBMIT request that
+// creates every batch job and returns 'pending' immediately, then small
+// client-driven TICK requests (the UI re-POSTs /statement/extract while the
+// job is pending) that each poll the outstanding jobs once, harvest rows from
+// newly finished ones, and finalize through the ordinary persistence flow
+// once every batch is terminal. The in-between state lives in
+// statement_extractions.providerState as versioned, worker-internal JSON —
+// non-NULL exactly while a resumable run is pending, NULL everywhere else.
+// ---------------------------------------------------------------------------
+
+interface ProviderStateJob {
+  jobId: string;
+  /** 'submitted' = still owed an answer. 'done' = completed, rows harvested.
+   * 'failed' = this batch could not be fully read — a failed/rejected job
+   * (no rows), or a partially_completed one (its readable rows ARE harvested,
+   * and the failure still marks the whole run truncated). */
+  status: 'submitted' | 'done' | 'failed';
+  /** Raw rows exactly as Sarvam returned them — envelope mapping and
+   * normalization happen once, at finalize. */
+  rows?: unknown[];
+}
+
+export interface ProviderState {
+  v: 1;
+  jobs: ProviderStateJob[];
+  batchCount: number;
+  submittedAt: string;
+}
+
+const JOB_STATE_STATUSES = new Set(['submitted', 'done', 'failed']);
+
+/**
+ * The one reader of the providerState blob. Anything that does not parse to
+ * the exact v1 shape is null — and a pending row whose state is null is
+ * simply a legacy in-flight run, handled by the original 409 guard. Corrupt
+ * state therefore degrades to the pre-sprint-12 behavior, never to a crash
+ * and never to a guessed resume.
+ */
+export function parseProviderState(raw: string | null | undefined): ProviderState | null {
+  if (typeof raw !== 'string') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || parsed.v !== 1) return null;
+  if (!Array.isArray(parsed.jobs) || typeof parsed.submittedAt !== 'string') return null;
+  if (typeof parsed.batchCount !== 'number' || !Number.isInteger(parsed.batchCount)) return null;
+  if (parsed.batchCount < 1) return null;
+  for (const job of parsed.jobs) {
+    if (!isRecord(job)) return null;
+    if (typeof job.jobId !== 'string' || job.jobId === '') return null;
+    if (typeof job.status !== 'string' || !JOB_STATE_STATUSES.has(job.status)) return null;
+    if (job.rows !== undefined && !Array.isArray(job.rows)) return null;
+  }
+  return parsed as unknown as ProviderState;
+}
+
+/**
+ * The additive progress contract: {done, total} ONLY while a pending job
+ * carries parseable resumable state — done counts batches the provider has
+ * settled, total is what was submitted. Everything else (settled jobs,
+ * blocking providers, legacy pending, corrupt state) is null, which the UI
+ * also uses as "this pending job is not tick-driven".
+ */
+export function statementProgress(
+  status: string,
+  providerState: string | null | undefined,
+): { done: number; total: number } | null {
+  if (status !== 'pending') return null;
+  const state = parseProviderState(providerState);
+  if (!state) return null;
+  return {
+    done: state.jobs.filter((j) => j.status !== 'submitted').length,
+    total: state.batchCount,
+  };
+}
+
+/**
+ * How long a resumable run may stay unfinished, measured from the state's own
+ * submittedAt — NOT the job row's createdAt, which deliberately survives
+ * re-runs (sprint 4) and would leave any re-run of an old statement born
+ * expired.
+ */
+export const STATEMENT_RESUME_DEADLINE_MS = 20 * 60 * 1000;
+
+export const STATEMENT_DEADLINE_MESSAGE =
+  'Sarvam did not finish within 20 minutes. Try again — if it keeps happening, ' +
+  'the document may be too complex for your Sarvam plan.';
+
+const NO_ROWS_MESSAGE =
+  'Sarvam could not read any transactions from this statement. ' +
+  'Try again, or try a clearer copy.';
+
+/** Result fetches per tick — with status polls for the outstanding jobs (≤10
+ * jobs even for a 100-page statement) this keeps a tick far under the
+ * free-plan ~50-subrequest cap; unharvested finished jobs simply wait for the
+ * next tick. */
+const TICK_MAX_RESULT_FETCHES = 2;
+
+/** The ONLY writer of a non-NULL providerState (and the explicit clear). The
+ * Anthropic branch never calls it — pinned by tests. */
+async function writeProviderState(
+  db: D1Database,
+  documentId: string,
+  state: ProviderState | null,
+  now: string,
+): Promise<void> {
+  await db
+    .prepare('UPDATE statement_extractions SET providerState = ?, updatedAt = ? WHERE documentId = ?')
+    .bind(state === null ? null : JSON.stringify(state), now, documentId)
+    .run();
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +271,8 @@ function toStatementJob(row: JobRow, rows: StatementRow[]): StatementExtraction 
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     rows,
+    // The raw providerState blob itself never leaves the worker.
+    progress: statementProgress(row.status, row.providerState),
   };
 }
 
@@ -174,7 +311,7 @@ export async function readStatements(
     const placeholders = chunk.map(() => '?').join(',');
     const { results } = await db
       .prepare(
-        `SELECT ${JOB_COLUMNS} FROM statement_extractions WHERE documentId IN (${placeholders})`,
+        `SELECT ${JOB_SELECT_COLUMNS} FROM statement_extractions WHERE documentId IN (${placeholders})`,
       )
       .bind(...chunk)
       .all<JobRow>();
@@ -332,8 +469,13 @@ export async function claimStatement(
   const claimed = current
     ? await db
         .prepare(
+          // providerState = NULL: a fresh claim starts a fresh run, so
+          // resumable state left by an earlier run (a failed submit's audit
+          // record, or a blob that would not parse) must never leak into it —
+          // otherwise the next POST would "tick" jobs this run never created.
           `UPDATE statement_extractions
-           SET status = 'pending', provider = ?, model = ?, error = NULL, updatedAt = ?
+           SET status = 'pending', provider = ?, model = ?, error = NULL,
+               providerState = NULL, updatedAt = ?
            WHERE documentId = ? AND updatedAt = ?`,
         )
         .bind(provider, model, now, documentId, current.updatedAt)
@@ -391,7 +533,7 @@ async function saveJob(db: D1Database, input: SaveJobInput): Promise<void> {
 
 async function readJob(db: D1Database, documentId: string): Promise<StatementExtraction> {
   const job = await db
-    .prepare(`SELECT ${JOB_COLUMNS} FROM statement_extractions WHERE documentId = ?`)
+    .prepare(`SELECT ${JOB_SELECT_COLUMNS} FROM statement_extractions WHERE documentId = ?`)
     .bind(documentId)
     .first<JobRow>();
   if (!job) throw new ApiFail(404, 'That statement is no longer available.');
@@ -434,13 +576,324 @@ async function insertRows(db: D1Database, rows: RowRow[]): Promise<void> {
   }
 }
 
-/** POST /api/documents/:id/statement/extract */
+/**
+ * The one persistence flow every completed read goes through, whichever
+ * provider produced the rows and however many requests it took: normalize,
+ * hide rows the user already imported, pre-flag duplicates, replace the
+ * untriaged proposals, save the job as suggested/partial. Extracted verbatim
+ * from the original single-request path (sprint 12) so the resumable
+ * finalize step reuses it rather than forking it.
+ */
+async function persistStatementRun(
+  env: Env,
+  documentId: string,
+  settings: Settings,
+  run: StatementRun,
+  provider: string,
+  model: string,
+  now: string,
+): Promise<StatementExtraction> {
+  const { rows: fields, capped } = normalizeStatementRows(run.rows, settings.categories);
+  const account = defaultStatementAccount(settings.accounts);
+
+  // Rows the user already imported keep their place and are not offered
+  // again, so re-running after importing half a statement shows the half
+  // that is still outstanding — not the whole thing over.
+  const confirmed = await readConfirmedRows(env.DB, documentId);
+  const alreadyImported = new Set(
+    confirmed
+      .map((r) => statementRowFingerprint(parseRowFields(r.fields), account))
+      .filter((fp): fp is string => fp !== null),
+  );
+
+  const fresh = fields.filter((f) => {
+    const fp = statementRowFingerprint(f, account);
+    return fp === null || !alreadyImported.has(fp);
+  });
+
+  const existing = await existingFingerprints(
+    env.DB,
+    fresh
+      .map((f) => statementRowFingerprint(f, account))
+      .filter((fp): fp is string => fp !== null),
+  );
+  const duplicates = flagDuplicates(
+    fresh.map((f) => statementRowFingerprint(f, account)),
+    existing,
+  );
+
+  // A re-run replaces what the user has not triaged. Dismissed rows go too:
+  // re-running is how a user asks for another read, and holding their earlier
+  // "no" against the new one would return a statement with holes in it.
+  await env.DB.prepare(
+    "DELETE FROM statement_rows WHERE documentId = ? AND status IN ('proposed', 'dismissed')",
+  )
+    .bind(documentId)
+    .run();
+
+  const base = confirmed.length;
+  await insertRows(
+    env.DB,
+    fresh.map((f, i) => ({
+      id: crypto.randomUUID(),
+      documentId,
+      idx: base + i,
+      fields: JSON.stringify(f),
+      status: 'proposed',
+      duplicate: duplicates[i] ? 1 : 0,
+      lowestConfidence: lowestConfidence(f),
+      createdAt: now,
+    })),
+  );
+
+  const truncated = run.truncated || capped;
+  await saveJob(env.DB, {
+    documentId,
+    // 'partial' is the loud status: rows may be missing, and the UI says so.
+    status: truncated ? 'partial' : 'suggested',
+    rowCount: base + fresh.length,
+    truncated,
+    provider,
+    model,
+    error: null,
+    now,
+  });
+  return await readJob(env.DB, documentId);
+}
+
+/** Store an attempted-and-failed run, readably (never a raw provider body). */
+async function saveFailedJob(
+  env: Env,
+  documentId: string,
+  provider: string,
+  model: string,
+  message: string,
+  now: string,
+): Promise<StatementExtraction> {
+  await saveJob(env.DB, {
+    documentId,
+    status: 'failed',
+    rowCount: 0,
+    truncated: false,
+    provider,
+    model,
+    error: clip(message),
+    now,
+  });
+  return await readJob(env.DB, documentId);
+}
+
+/**
+ * The Sarvam SUBMIT step — runs under a fresh claim. Creates every batch job
+ * without polling any of them, parks the job ids in providerState, and leaves
+ * the row 'pending' for the ticks to advance. If a create call fails partway,
+ * the jobs that DO exist are still recorded (they were created at Sarvam and
+ * paid for — an audit trail, not a live run) but the whole run is failed
+ * readably: with the run failed, no tick will ever poll them, so a
+ * half-submitted read can never turn into orphan polling.
+ */
+async function submitSarvamStatement(
+  env: Env,
+  documentId: string,
+  provider: string,
+  model: string,
+  settings: Settings,
+  bytes: ArrayBuffer,
+  now: string,
+  deps: SarvamDeps,
+): Promise<StatementExtraction> {
+  let apiKey: string;
+  try {
+    apiKey = await requireSarvamKey(env);
+  } catch (err) {
+    return saveFailedJob(
+      env,
+      documentId,
+      provider,
+      model,
+      err instanceof Error ? err.message : 'Statement extraction failed.',
+      now,
+    );
+  }
+
+  const submit = await submitSarvamStatementJobs(apiKey, bytes, settings.categories, deps);
+  const state: ProviderState = {
+    v: 1,
+    jobs: submit.jobIds.map((jobId) => ({ jobId, status: 'submitted' as const })),
+    batchCount: submit.batchCount,
+    submittedAt: now,
+  };
+
+  if (submit.failure) {
+    const failed = await saveFailedJob(env, documentId, provider, model, submit.failure.message, now);
+    if (submit.jobIds.length > 0) {
+      await writeProviderState(env.DB, documentId, state, now);
+    }
+    return failed;
+  }
+
+  await writeProviderState(env.DB, documentId, state, now);
+  // Still 'pending' (the claim set it); progress now reads {0, batchCount}.
+  return await readJob(env.DB, documentId);
+}
+
+/**
+ * One TICK: poll each outstanding job once, harvest rows from the ones that
+ * finished (at most TICK_MAX_RESULT_FETCHES result fetches per tick), persist
+ * the updated state, and finalize through persistStatementRun once every
+ * batch is terminal. Provider trouble mid-tick (network, 429, a revoked key)
+ * is swallowed: whatever this tick learned is kept and the next tick simply
+ * tries again — poll semantics, bounded by the overall deadline below, never
+ * by a wall-clock wait inside the request.
+ */
+async function runStatementTick(
+  env: Env,
+  settings: Settings,
+  current: JobRow,
+  state: ProviderState,
+  now: string,
+  deps: SarvamDeps,
+): Promise<StatementExtraction> {
+  const documentId = current.documentId;
+
+  if (state.jobs.some((j) => j.status === 'submitted')) {
+    // Overall deadline, anchored on submittedAt (see STATEMENT_RESUME_DEADLINE_MS
+    // for why not createdAt). Only an unfinished run can expire: a run whose
+    // batches are all terminal finalizes below no matter how late the tick is —
+    // the pages are already read and paid for.
+    const submitted = Date.parse(state.submittedAt);
+    const anchor = Number.isNaN(submitted) ? Date.parse(current.createdAt) : submitted;
+    if (Date.parse(now) - anchor > STATEMENT_RESUME_DEADLINE_MS) {
+      await writeProviderState(env.DB, documentId, null, now);
+      return await saveFailedJob(
+        env,
+        documentId,
+        current.provider,
+        current.model,
+        STATEMENT_DEADLINE_MESSAGE,
+        now,
+      );
+    }
+
+    // A key removed mid-run makes this tick a no-op rather than a failure:
+    // the jobs still exist at Sarvam and were paid for, so the run stays
+    // resumable in case the key comes back — the deadline above bounds how
+    // long that grace lasts, and the Settings banner already says the key is
+    // missing.
+    const apiKey = await readSarvamApiKey(env.DB);
+    if (apiKey) {
+      let harvests = 0;
+      try {
+        for (const job of state.jobs) {
+          if (job.status !== 'submitted') continue;
+          const status = await pollSarvamJobStatus(apiKey, job.jobId, deps);
+          if (!isSarvamTerminal(status)) continue;
+          if (status === 'failed' || status === 'rejected') {
+            job.status = 'failed';
+            continue;
+          }
+          // completed / partially_completed both have readable results.
+          if (harvests >= TICK_MAX_RESULT_FETCHES) continue; // next tick's work
+          job.rows = await fetchSarvamJobRows(apiKey, job.jobId, deps);
+          job.status = status === 'completed' ? 'done' : 'failed';
+          harvests++;
+        }
+      } catch {
+        // Transient by decree: keep what this tick learned, retry next tick.
+        // The messages fetchJson throws are already stripped of provider
+        // bodies, and nothing here is logged.
+      }
+    }
+
+    await writeProviderState(env.DB, documentId, state, now);
+    if (state.jobs.some((j) => j.status === 'submitted')) {
+      return await readJob(env.DB, documentId);
+    }
+  }
+
+  // FINALIZE — every batch is terminal. Raw rows concatenate in batch (page)
+  // order, get the envelope shape, and ride the ordinary persistence flow.
+  // Any failed batch (including a partially completed one) marks the run
+  // truncated: rows may be missing and the UI must say so.
+  const rawRows: unknown[] = [];
+  for (const job of state.jobs) {
+    for (const raw of job.rows ?? []) rawRows.push(raw);
+  }
+  const anyFailed = state.jobs.some((j) => j.status === 'failed');
+
+  // Clearing state first makes a crash mid-finalize land in the legacy
+  // 'pending without state' shape, which the existing in-flight window
+  // already knows how to reclaim — never in a half-finalized resumable run.
+  await writeProviderState(env.DB, documentId, null, now);
+
+  if (rawRows.length === 0) {
+    // Nothing readable came back from any batch (all failed, or every
+    // completed batch was empty) — an honest failure, not "0 proposed".
+    return await saveFailedJob(
+      env,
+      documentId,
+      current.provider,
+      current.model,
+      NO_ROWS_MESSAGE,
+      now,
+    );
+  }
+
+  try {
+    return await persistStatementRun(
+      env,
+      documentId,
+      settings,
+      { rows: rawRows.map(toStatementEnvelopeRow), truncated: anyFailed },
+      current.provider,
+      current.model,
+      now,
+    );
+  } catch (err) {
+    if (err instanceof ApiFail) throw err;
+    return await saveFailedJob(
+      env,
+      documentId,
+      current.provider,
+      current.model,
+      err instanceof Error ? err.message : 'Statement extraction failed.',
+      now,
+    );
+  }
+}
+
+/**
+ * POST /api/documents/:id/statement/extract
+ *
+ * Three shapes share this endpoint: a fresh run (claim → read → persist), the
+ * Sarvam SUBMIT (claim → create batch jobs → return pending), and a TICK on a
+ * pending resumable run (no claim — the tick IS the run making progress).
+ * `deps` is a test seam threaded to the Sarvam client; production callers
+ * pass nothing.
+ */
 export async function runStatementExtraction(
   env: Env,
   documentId: string,
+  deps: SarvamDeps = {},
 ): Promise<StatementExtraction> {
   const doc = await readDocumentRow(env.DB, documentId);
   const settings = await readSettings(env.DB);
+  const now = new Date().toISOString();
+
+  // A pending job carrying parseable resumable state makes this POST a tick,
+  // not a new run — checked before the configuration gates so a paid,
+  // in-flight read can still finish after the user changes provider settings
+  // mid-run. State that fails to parse is legacy pending: fall through to the
+  // claim, whose original 409/in-flight semantics apply unchanged (and whose
+  // claim clears the unparseable blob when the window lapses).
+  const current = await env.DB
+    .prepare(`SELECT ${JOB_SELECT_COLUMNS} FROM statement_extractions WHERE documentId = ?`)
+    .bind(documentId)
+    .first<JobRow>();
+  if (current && current.status === 'pending' && current.providerState !== null) {
+    const state = parseProviderState(current.providerState);
+    if (state) return runStatementTick(env, settings, current, state, now, deps);
+  }
 
   // Configuration problems are the user's to fix, so they are 400s and leave
   // no row behind; only an attempted-and-failed run is stored as `failed`.
@@ -452,7 +905,6 @@ export async function runStatementExtraction(
 
   // Claim before touching R2 or the model — everything above is configuration,
   // everything below is the run itself.
-  const now = new Date().toISOString();
   await claimStatement(env.DB, documentId, provider, model, now);
 
   const object = await env.BUCKET.get(doc.objectKey);
@@ -462,87 +914,23 @@ export async function runStatementExtraction(
     throw new ApiFail(413, 'That file is too large to send for extraction.');
   }
 
+  if (provider === 'sarvam') {
+    return submitSarvamStatement(env, documentId, provider, model, settings, bytes, now, deps);
+  }
+
   try {
     const run = await extractStatementFromDocument(env, settings, doc, bytes);
-    const { rows: fields, capped } = normalizeStatementRows(run.rows, settings.categories);
-    const account = defaultStatementAccount(settings.accounts);
-
-    // Rows the user already imported keep their place and are not offered
-    // again, so re-running after importing half a statement shows the half
-    // that is still outstanding — not the whole thing over.
-    const confirmed = await readConfirmedRows(env.DB, documentId);
-    const alreadyImported = new Set(
-      confirmed
-        .map((r) => statementRowFingerprint(parseRowFields(r.fields), account))
-        .filter((fp): fp is string => fp !== null),
-    );
-
-    const fresh = fields.filter((f) => {
-      const fp = statementRowFingerprint(f, account);
-      return fp === null || !alreadyImported.has(fp);
-    });
-
-    const existing = await existingFingerprints(
-      env.DB,
-      fresh
-        .map((f) => statementRowFingerprint(f, account))
-        .filter((fp): fp is string => fp !== null),
-    );
-    const duplicates = flagDuplicates(
-      fresh.map((f) => statementRowFingerprint(f, account)),
-      existing,
-    );
-
-    // A re-run replaces what the user has not triaged. Dismissed rows go too:
-    // re-running is how a user asks for another read, and holding their earlier
-    // "no" against the new one would return a statement with holes in it.
-    await env.DB.prepare(
-      "DELETE FROM statement_rows WHERE documentId = ? AND status IN ('proposed', 'dismissed')",
-    )
-      .bind(documentId)
-      .run();
-
-    const base = confirmed.length;
-    await insertRows(
-      env.DB,
-      fresh.map((f, i) => ({
-        id: crypto.randomUUID(),
-        documentId,
-        idx: base + i,
-        fields: JSON.stringify(f),
-        status: 'proposed',
-        duplicate: duplicates[i] ? 1 : 0,
-        lowestConfidence: lowestConfidence(f),
-        createdAt: now,
-      })),
-    );
-
-    const truncated = run.truncated || capped;
-    await saveJob(env.DB, {
-      documentId,
-      // 'partial' is the loud status: rows may be missing, and the UI says so.
-      status: truncated ? 'partial' : 'suggested',
-      rowCount: base + fresh.length,
-      truncated,
-      provider,
-      model,
-      error: null,
-      now,
-    });
-    return await readJob(env.DB, documentId);
+    return await persistStatementRun(env, documentId, settings, run, provider, model, now);
   } catch (err) {
     if (err instanceof ApiFail) throw err;
-    await saveJob(env.DB, {
+    return await saveFailedJob(
+      env,
       documentId,
-      status: 'failed',
-      rowCount: 0,
-      truncated: false,
       provider,
       model,
-      error: clip(err instanceof Error ? err.message : 'Statement extraction failed.'),
+      err instanceof Error ? err.message : 'Statement extraction failed.',
       now,
-    });
-    return await readJob(env.DB, documentId);
+    );
   }
 }
 

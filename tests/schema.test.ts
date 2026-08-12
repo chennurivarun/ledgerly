@@ -35,7 +35,9 @@ function parseColumns(body: string): string[] {
 
 function fakeDb(opts: { alterError?: Error } = {}) {
   const tables = new Map<string, string[]>();
-  let alterAttempts = 0;
+  // Per-table so each migration's idempotence is pinned on its own count,
+  // however many migrations MIGRATION_STATEMENTS grows to.
+  const alterCounts = new Map<string, number>();
 
   function exec(sql: string): void {
     const create = sql.match(/^\s*CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*)\)\s*$/i);
@@ -46,9 +48,9 @@ function fakeDb(opts: { alterError?: Error } = {}) {
     }
     const alter = sql.match(/^\s*ALTER TABLE (\w+) ADD COLUMN (\w+)/i);
     if (alter) {
-      alterAttempts++;
-      if (opts.alterError) throw opts.alterError;
       const [, name, column] = alter;
+      alterCounts.set(name, (alterCounts.get(name) ?? 0) + 1);
+      if (opts.alterError) throw opts.alterError;
       const cols = tables.get(name);
       if (!cols) throw new Error(`no such table: ${name}`);
       if (cols.includes(column)) {
@@ -87,7 +89,7 @@ function fakeDb(opts: { alterError?: Error } = {}) {
     },
   } as unknown as D1Database;
 
-  return { db, tables, alterAttempts: () => alterAttempts };
+  return { db, tables, alterAttempts: (table: string) => alterCounts.get(table) ?? 0 };
 }
 
 /** The documents table exactly as it shipped BEFORE sprint 11 — no pageCount. */
@@ -119,7 +121,7 @@ describe('ensureSchema — pageCount migration', () => {
     // Second run: the ALTER fires again, hits duplicate-column, and is
     // swallowed — no error, no change.
     await ensureSchema(db, { force: true });
-    expect(alterAttempts()).toBe(2);
+    expect(alterAttempts('documents')).toBe(2);
     expect(tables.get('documents')?.filter((c) => c === 'pageCount')).toHaveLength(1);
   });
 
@@ -142,5 +144,50 @@ describe('ensureSchema — pageCount migration', () => {
   it('pins pageCount in the documents CREATE, so fresh installs never depend on the ALTER', () => {
     const create = SCHEMA_STATEMENTS.find((s) => /CREATE TABLE IF NOT EXISTS documents/.test(s));
     expect(create).toMatch(/pageCount INTEGER/);
+  });
+});
+
+/** statement_extractions exactly as it shipped BEFORE sprint 12 — no providerState. */
+const OLD_STATEMENT_EXTRACTIONS_CREATE = `CREATE TABLE IF NOT EXISTS statement_extractions (
+    documentId TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    rowCount INTEGER NOT NULL DEFAULT 0,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    error TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  )`;
+
+describe('ensureSchema — providerState migration (sprint 12)', () => {
+  it('adds providerState to a pre-migration statement_extractions table, idempotently', async () => {
+    const { db, tables, alterAttempts } = fakeDb();
+    await db.prepare(OLD_STATEMENT_EXTRACTIONS_CREATE).run();
+    expect(tables.get('statement_extractions')).not.toContain('providerState');
+
+    await ensureSchema(db, { force: true });
+    expect(tables.get('statement_extractions')).toContain('providerState');
+
+    await ensureSchema(db, { force: true });
+    expect(alterAttempts('statement_extractions')).toBe(2);
+    expect(
+      tables.get('statement_extractions')?.filter((c) => c === 'providerState'),
+    ).toHaveLength(1);
+  });
+
+  it('a fresh database gets providerState from the CREATE itself', async () => {
+    const { db, tables } = fakeDb();
+    await ensureSchema(db, { force: true });
+    expect(tables.get('statement_extractions')).toContain('providerState');
+    await expect(ensureSchema(db, { force: true })).resolves.toBeUndefined();
+  });
+
+  it('pins providerState LAST in the CREATE — matching where the ALTER appends it', () => {
+    const create = SCHEMA_STATEMENTS.find((s) =>
+      /CREATE TABLE IF NOT EXISTS statement_extractions/.test(s),
+    );
+    expect(create).toBeDefined();
+    expect(create).toMatch(/providerState TEXT\s*\)\s*$/);
   });
 });

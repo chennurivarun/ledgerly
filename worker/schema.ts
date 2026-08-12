@@ -53,7 +53,8 @@ export const SCHEMA_STATEMENTS = [
     model TEXT NOT NULL,
     error TEXT,
     createdAt TEXT NOT NULL,
-    updatedAt TEXT NOT NULL
+    updatedAt TEXT NOT NULL,
+    providerState TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS statement_rows (
     id TEXT PRIMARY KEY,
@@ -120,7 +121,13 @@ export const SCHEMA_STATEMENTS = [
  *   Anything else re-throws — a migration that fails for a real reason must
  *   be loud, not silently skipped.
  */
-const MIGRATION_STATEMENTS = ['ALTER TABLE documents ADD COLUMN pageCount INTEGER'];
+const MIGRATION_STATEMENTS = [
+  'ALTER TABLE documents ADD COLUMN pageCount INTEGER',
+  // Sprint 12: a resumable Sarvam statement read parks its submit/tick state
+  // here (worker/statements.ts owns the JSON shape). NULL for settled jobs,
+  // single-request providers, and every row that predates the migration.
+  'ALTER TABLE statement_extractions ADD COLUMN providerState TEXT',
+];
 
 /** The one ALTER outcome that means "already migrated" (D1 wraps the SQLite
  * message, so match the substring on the error and its cause). */
