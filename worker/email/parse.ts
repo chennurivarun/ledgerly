@@ -158,6 +158,44 @@ function detectAmount(text: string): number | null {
 // Merchant (generic-en)
 // ---------------------------------------------------------------------------
 
+/**
+ * Boundary markers that end a merchant capture (integration-QA ruling): the
+ * raw at|to|from capture runs to the end of the clause, which on real alerts
+ * drags trailing boilerplate into the name ("STARBUCKS STORE 08841 on your
+ * card ending 4321") — and a sloppy merchant poisons duplicate fingerprints
+ * and the sprint-5 rule suggestions. The capture is truncated at the FIRST of
+ * these markers. Deterministic and enumerable ON PURPOSE — no cleverness
+ * beyond this list. Word-boundary anchored (not literal ' marker ') so a
+ * capture that BEGINS with a marker truncates to empty and the email lands
+ * unparsed (never-guess holds) instead of keeping boilerplate as a merchant.
+ */
+const MERCHANT_BOUNDARIES: RegExp[] = [
+  // Sentence terminator or line break. The capture classes exclude these
+  // characters today, so these two are unreachable belt-and-braces — kept so
+  // the boundary list stays complete if a capture regex ever loosens.
+  /[.!?](?=\s|$)/,
+  /[\r\n]/,
+  /\bon your card\b/i,
+  /\busing card\b/i,
+  /\bwith card\b/i,
+  /\bending\s/i,
+  // "on" followed by a date-like token (08/12, 2026-08, Aug …).
+  /\bon (?=\d{1,2}\/\d{1,2}|\d{4}-\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))/i,
+  // "at" followed by a time-like token (12:45).
+  /\bat (?=\d{1,2}:\d{2})/i,
+  /\bvia\b/i,
+];
+
+/** Cut the capture at the first boundary marker; the trims below finish up. */
+function truncateAtBoundary(raw: string): string {
+  let cut = raw.length;
+  for (const re of MERCHANT_BOUNDARIES) {
+    const m = re.exec(raw);
+    if (m && m.index < cut) cut = m.index;
+  }
+  return raw.slice(0, cut);
+}
+
 /** True when the capture is really a money value, not a merchant name. */
 function looksLikeMoney(candidate: string): boolean {
   if (/^\d[\d.,\s]*$/.test(candidate)) return true;
@@ -168,13 +206,14 @@ function looksLikeMoney(candidate: string): boolean {
 }
 
 /**
- * Trim a raw capture down to the name the email actually stated: cut
- * auxiliary-verb tails ("…APARTMENTS was made"), date tails ("…STARBUCKS on
- * 08/10"), and trailing reference codes, then trailing punctuation. Empty
- * after trimming → null, and a capture that is itself a money value → null.
+ * Trim a raw capture down to the name the email actually stated: truncate at
+ * the first boundary marker, then cut auxiliary-verb tails ("…APARTMENTS was
+ * made"), date tails ("…STARBUCKS on 08/10"), and trailing reference codes,
+ * then trailing punctuation. Empty after truncation/trimming → null, and a
+ * capture that is itself a money value → null.
  */
 function cleanMerchant(raw: string): string | null {
-  let s = raw;
+  let s = truncateAtBoundary(raw);
   s = s.replace(/\s+(?:was|were|is|are|has|have|had|will)\b[\s\S]*$/i, '');
   s = s.replace(/\s+on\s+\d[\s\S]*$/i, '');
   s = s.replace(/\s*[-–#(]?\s*\b(?:ref(?:erence)?|txn|auth(?:orization)?)\b[.:#\s]*\S*\s*$/i, '');
