@@ -116,7 +116,11 @@ comfortable letting AI make financial decisions autonomously).
    finances — "chat with your money" without the data ever leaving their
    control.
 6. **Proactive briefings & anomaly alerts** — last, once 1–4 generate the
-   signal that makes alerts useful instead of noisy.
+   signal that makes alerts useful instead of noisy. ✅ *Briefings shipped
+   August 2026: a deterministic weekly/daily digest (last-7-days activity,
+   next-7-days forecast, items awaiting review) delivered over WhatsApp via
+   the user's own Meta Business Cloud API credentials. Anomaly alerts still
+   to come.*
 
 ### Phase 3 — Sustainability and the business wedge
 
