@@ -1,7 +1,7 @@
 // Settings page (spec §16) — display currency, net worth setup, managed
 // categories/tags/accounts, automatic detection controls, Drive sync status,
 // and the danger zone.
-import { AlertTriangle, Coins, ExternalLink, FolderSync, MessageCircle, Radar, RotateCcw, Sparkles, Wallet } from 'lucide-react';
+import { AlertTriangle, Coins, ExternalLink, FolderSync, Mail, MessageCircle, Radar, RotateCcw, Sparkles, Wallet, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { fmtCurrency } from '../../shared/format';
 import type { AiProvider, BriefingCadence } from '../../shared/types';
@@ -24,6 +24,14 @@ import {
   lastBriefingLabel,
   type BriefingSettingsUpdate,
 } from '../components/settings/briefingHelpers';
+import {
+  addSenderEntry,
+  buildAllowlistUpdate,
+  buildEmailFeedToggleUpdate,
+  removeSenderEntry,
+  senderEntryError,
+  showEmptyAllowlistWarning,
+} from '../components/inbox/inboxHelpers';
 import { useStore } from '../store';
 import { Button, Card, EmptyState, Field, InlineError, Input, SegmentedControl, Spinner } from '../components/ui';
 
@@ -117,6 +125,25 @@ export default function Settings() {
           // SAVED config at call time and its error message surfaces inline.
           const res = await sendBriefing();
           toast('success', briefingSentMessage(res.sentTo));
+        }}
+      />
+
+      <MailInFeedSection
+        enabled={settings.emailFeedEnabled}
+        allowedSenders={settings.emailAllowedSenders}
+        onToggle={async (next) => {
+          await updatePreferences(buildEmailFeedToggleUpdate(next));
+          toast('success', next ? 'Mail-in feed enabled.' : 'Mail-in feed disabled.');
+        }}
+        onAddSender={async (raw) => {
+          // Read fresh at dispatch time — full-replacement saves must not
+          // drop a concurrent change (same rule as the managed lists below).
+          const current = useStore.getState().settings.emailAllowedSenders;
+          await updatePreferences(buildAllowlistUpdate(addSenderEntry(current, raw)));
+        }}
+        onRemoveSender={async (entry) => {
+          const current = useStore.getState().settings.emailAllowedSenders;
+          await updatePreferences(buildAllowlistUpdate(removeSenderEntry(current, entry)));
         }}
       />
 
@@ -971,6 +998,197 @@ function BriefingsSection({
             )}
             {lastSentLabel && <p className="text-xs text-muted">{lastSentLabel}</p>}
           </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function MailInFeedSection({
+  enabled,
+  allowedSenders,
+  onToggle,
+  onAddSender,
+  onRemoveSender,
+}: {
+  enabled: boolean;
+  allowedSenders: string[];
+  onToggle: (next: boolean) => Promise<void>;
+  onAddSender: (raw: string) => Promise<void>;
+  onRemoveSender: (entry: string) => Promise<void>;
+}) {
+  const [togglePending, setTogglePending] = useState<boolean | null>(null);
+  const [toggleError, setToggleError] = useState<string | null>(null);
+
+  const [entryDraft, setEntryDraft] = useState('');
+  const [addBusy, setAddBusy] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [removingEntry, setRemovingEntry] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  const activeEnabled = togglePending ?? enabled;
+  // Add and remove rewrite the same list — one allowlist write (or toggle
+  // save) at a time, same discipline as the Briefings section above.
+  const anyBusy = togglePending !== null || addBusy || removingEntry !== null;
+
+  async function handleToggle(next: boolean) {
+    if (next === enabled || anyBusy) return;
+    setTogglePending(next);
+    setToggleError(null);
+    try {
+      await onToggle(next);
+    } catch (e) {
+      setToggleError(e instanceof Error ? e.message : 'Could not save. Try again.');
+    } finally {
+      setTogglePending(null);
+    }
+  }
+
+  async function handleAdd() {
+    const validationError = senderEntryError(entryDraft, allowedSenders);
+    if (validationError) {
+      setAddError(validationError);
+      return;
+    }
+    setAddBusy(true);
+    setAddError(null);
+    try {
+      await onAddSender(entryDraft);
+      setEntryDraft('');
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : 'Could not add that sender. Try again.');
+    } finally {
+      setAddBusy(false);
+    }
+  }
+
+  async function handleRemove(entry: string) {
+    setRemovingEntry(entry);
+    setRemoveError(null);
+    try {
+      await onRemoveSender(entry);
+    } catch (e) {
+      setRemoveError(e instanceof Error ? e.message : 'Could not remove that sender. Try again.');
+    } finally {
+      setRemovingEntry(null);
+    }
+  }
+
+  return (
+    <Card title="Mail-in feed">
+      <div className="flex items-start gap-3">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
+          <Mail className="size-5" aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1 space-y-4">
+          <p className="text-sm text-muted">
+            Bank alerts, e-receipts, and statements emailed to an address you control become
+            proposed transactions here. Only allow-listed senders are accepted, nothing is imported
+            without your review, and inbound email never triggers AI.
+          </p>
+
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-medium">Enable the mail-in feed</p>
+            <Toggle
+              checked={activeEnabled}
+              onChange={(next) => void handleToggle(next)}
+              label="Enable the mail-in feed"
+              disabled={anyBusy}
+            />
+          </div>
+          {togglePending !== null && (
+            <p className="flex items-center gap-1.5 text-xs text-muted">
+              <Spinner className="size-3.5" /> Saving…
+            </p>
+          )}
+          <InlineError message={toggleError} />
+
+          {/*
+            Allowlist shows while the feed is on OR entries are stored — a
+            saved allowlist stays editable without re-enabling the feed first
+            (same principle as the Briefings delivery block above).
+          */}
+          {(activeEnabled || allowedSenders.length > 0) && (
+            <div className="space-y-4 border-t border-border pt-4">
+              <p className="rounded-xl border border-border bg-canvas px-3 py-2.5 text-xs text-muted">
+                Ledgerly never connects to a mailbox. Routing happens in your own Cloudflare
+                dashboard: under Email Routing, route an address to your Ledgerly Worker, then
+                allow the senders you trust below — see the{' '}
+                <a
+                  href="https://github.com/chennurivarun/ledgerly/blob/main/docs/EMAIL-FEED.md"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-accent hover:underline"
+                >
+                  setup guide
+                </a>
+                .
+              </p>
+
+              {showEmptyAllowlistWarning(activeEnabled, allowedSenders) && (
+                <p className="rounded-lg bg-caution-soft px-3 py-2 text-xs font-medium text-caution">
+                  The feed is on but the allowlist is empty — no email will be accepted until you
+                  add a sender.
+                </p>
+              )}
+
+              {allowedSenders.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {allowedSenders.map((entry) => (
+                    <span
+                      key={entry}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-border bg-canvas py-1.5 pl-3 pr-1.5 text-sm"
+                    >
+                      {entry}
+                      <button
+                        type="button"
+                        aria-label={`Remove ${entry} from the allowlist`}
+                        disabled={anyBusy}
+                        onClick={() => void handleRemove(entry)}
+                        // Padding + negative margin grows the tap target to
+                        // ~44px without growing the chip (ManagedListSection).
+                        className="-m-2.5 flex size-11 items-center justify-center rounded-full p-2.5 text-muted hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                      >
+                        {removingEntry === entry ? (
+                          <Spinner className="size-3.5" />
+                        ) : (
+                          <X className="size-3.5" aria-hidden />
+                        )}
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <InlineError message={removeError} />
+
+              <form
+                className="flex gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void handleAdd();
+                }}
+              >
+                <Field label="Add an allowed sender" hint="An exact address, or a whole domain starting with @.">
+                  <Input
+                    value={entryDraft}
+                    disabled={anyBusy}
+                    onChange={(e) => {
+                      setEntryDraft(e.target.value);
+                      if (addError) setAddError(null);
+                    }}
+                    placeholder="alerts@bank.com or @bank.com"
+                    aria-label="New allowed sender"
+                  />
+                </Field>
+                <div className="flex items-start pt-7">
+                  <Button type="submit" variant="ghost" loading={addBusy} disabled={anyBusy}>
+                    Add
+                  </Button>
+                </div>
+              </form>
+              <InlineError message={addError} />
+            </div>
+          )}
         </div>
       </div>
     </Card>

@@ -9,6 +9,7 @@ import {
   type DocumentMeta,
   type ExtractionResult,
   type ExtractionStatus,
+  type InboxEmail,
   type StatementExtraction,
   type StatementJobStatus,
   type UploadResult,
@@ -17,6 +18,9 @@ import { api } from '../api';
 import { ExtractionReviewModal } from '../components/ai/ExtractionReviewModal';
 import { isDocumentExtractable } from '../components/ai/extractionHelpers';
 import { StatementReviewModal } from '../components/ai/StatementReviewModal';
+import { InboxConfirmModal } from '../components/inbox/InboxConfirmModal';
+import { InboxSection } from '../components/inbox/InboxSection';
+import { proposedCount, visibleInboxItems } from '../components/inbox/inboxHelpers';
 import { ConfirmDialog } from '../components/manage/ConfirmDialog';
 import { StatusBadge, type BadgeTone } from '../components/manage/StatusBadge';
 import { useDriveSync } from '../components/manage/useDriveSync';
@@ -121,11 +125,14 @@ export default function Documents() {
   const documents = useStore((s) => s.documents);
   const extractions = useStore((s) => s.extractions);
   const statements = useStore((s) => s.statements);
+  const inboxEmails = useStore((s) => s.inboxEmails);
   const aiProvider = useStore((s) => s.settings.aiProvider);
   const aiKeySet = useStore((s) => s.settings.aiKeySet);
+  const emailFeedEnabled = useStore((s) => s.settings.emailFeedEnabled);
   const uploadDocuments = useStore((s) => s.uploadDocuments);
   const extractDocument = useStore((s) => s.extractDocument);
   const extractStatement = useStore((s) => s.extractStatement);
+  const dismissInboxEmail = useStore((s) => s.dismissInboxEmail);
   const refreshQuiet = useStore((s) => s.refreshQuiet);
   const toast = useStore((s) => s.toast);
   const drive = useDriveSync();
@@ -150,12 +157,16 @@ export default function Documents() {
   // transient surface (this), no redundant toast on top of either.
   const [extractError, setExtractError] = useState<{ id: string; message: string } | null>(null);
   const [statementError, setStatementError] = useState<{ id: string; message: string } | null>(null);
-  // Single slot for whichever review modal is open (extraction or
-  // statement) — one `kind` field means an auto-open from either flow can
-  // check "is anything at all already open" with one freshness-guaranteed
-  // updater, instead of two state variables that can't see each other's
-  // latest value from inside a setState callback.
-  const [reviewing, setReviewing] = useState<{ id: string; kind: 'extract' | 'statement' } | null>(null);
+  // Single slot for whichever review modal is open (extraction, statement,
+  // or a mail-in inbox confirm) — one `kind` field means an auto-open from
+  // either AI flow can check "is anything at all already open" with one
+  // freshness-guaranteed updater, instead of state variables that can't see
+  // each other's latest value from inside a setState callback. The inbox
+  // confirm sharing this slot is what keeps a resolving extraction from
+  // auto-opening its modal ON TOP of an open inbox form (sprint-4 lesson).
+  const [reviewing, setReviewing] = useState<{ id: string; kind: 'extract' | 'statement' | 'inbox' } | null>(null);
+  // One in-flight inbox row action at a time (the id being dismissed).
+  const [inboxDismissing, setInboxDismissing] = useState<string | null>(null);
 
   const aiOn = aiProvider !== 'off';
   // Anthropic without a stored key can't actually extract anything — treat
@@ -253,6 +264,17 @@ export default function Documents() {
   // and force-clearing on that would fight the very fix meant to preserve it.
   useEffect(() => {
     if (!reviewing) return;
+    if (reviewing.kind === 'inbox') {
+      // Gated on the inbox ITEM disappearing from the payload only — a
+      // status flip (e.g. to 'confirmed' via this modal's own refreshQuiet)
+      // keeps the item in the list, so the modal's own close handles it.
+      const itemStillExists = inboxEmails.some((i) => i.id === reviewing.id);
+      if (!itemStillExists) {
+        setReviewing(null);
+        toast('error', 'That email is no longer available.');
+      }
+      return;
+    }
     const docStillExists = documents.some((d) => d.id === reviewing.id);
     if (!docStillExists) {
       setReviewing(null);
@@ -263,7 +285,19 @@ export default function Documents() {
           : 'That document is no longer available.',
       );
     }
-  }, [reviewing, documents, toast]);
+  }, [reviewing, documents, inboxEmails, toast]);
+
+  async function handleInboxDismiss(item: InboxEmail) {
+    setInboxDismissing(item.id);
+    try {
+      await dismissInboxEmail(item.id);
+      toast('success', 'Email dismissed.');
+    } catch (e) {
+      toast('error', e instanceof Error ? e.message : 'Could not dismiss that email.');
+    } finally {
+      setInboxDismissing(null);
+    }
+  }
 
   async function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
@@ -314,6 +348,13 @@ export default function Documents() {
 
   const status = drive.status;
   const folderConfigured = !!status?.folder.folderUrl;
+
+  // Mail-in inbox: only undecided items render (helper pins the filter), and
+  // the whole section hides when there's nothing to show AND the feed is off
+  // — no empty filler for a feature the user hasn't turned on.
+  const inboxItems = visibleInboxItems(inboxEmails);
+  const inboxProposed = proposedCount(inboxEmails);
+  const showInbox = inboxItems.length > 0 || emailFeedEnabled;
 
   return (
     <div className="space-y-6">
@@ -455,6 +496,22 @@ export default function Documents() {
             Switch in Settings
           </Link>
         </div>
+      )}
+
+      {showInbox && (
+        <InboxSection
+          items={inboxItems}
+          proposed={inboxProposed}
+          documents={documents}
+          // Opening the confirm modal while an AI run is in flight is the
+          // same race that hijacks an open modal when the run resolves —
+          // disabled in parity with the AI Review buttons; also holds the
+          // one-in-flight rule while a row dismiss is running.
+          actionsDisabled={running !== null || inboxDismissing !== null}
+          dismissingId={inboxDismissing}
+          onReview={(item) => setReviewing({ id: item.id, kind: 'inbox' })}
+          onDismiss={(item) => void handleInboxDismiss(item)}
+        />
       )}
 
       <Card title={documents.length > 0 ? 'Document vault' : undefined}>
@@ -662,6 +719,18 @@ export default function Documents() {
               statement={reviewStatement}
               onClose={closeReview}
             />
+          );
+        })()}
+
+      {reviewing?.kind === 'inbox' &&
+        (() => {
+          const reviewItem = inboxEmails.find((i) => i.id === reviewing.id);
+          if (!reviewItem) return null;
+          return (
+            // Same keyed-remount (per item id) + stable-onClose discipline
+            // as both modals above — a stale draft can never render against
+            // a different email's audit trail.
+            <InboxConfirmModal key={reviewing.id} item={reviewItem} onClose={closeReview} />
           );
         })()}
     </div>
