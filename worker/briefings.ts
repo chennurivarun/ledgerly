@@ -27,9 +27,10 @@ import { sendWhatsappText } from './whatsapp';
 /**
  * The worker's calendar day. UTC on purpose: the worker has no user timezone,
  * and a stable, honest clock beats a guessed local one (the cron tick is
- * documented as 08:00 UTC for the same reason).
+ * documented as 08:00 UTC for the same reason). Exported so the MCP tools
+ * (worker/mcp/tools.ts) run on the same clock.
  */
-function todayIsoUtc(): string {
+export function todayIsoUtc(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
