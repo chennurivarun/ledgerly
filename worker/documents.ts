@@ -2,6 +2,7 @@
 // D1 (spec §4.2, §4.6). One bad file never sinks the rest of the batch (§20).
 import { detectMapping, parseCsv, rowsToTransactions } from '../shared/csv';
 import { MAX_FILE_BYTES, type DocStatus, type DocumentMeta, type UploadResult } from '../shared/types';
+import { countPdfPages } from './ai/pdfSplit';
 import { readSettings } from './settingsStore';
 import { insertTransactions } from './transactions';
 import { ApiFail, clip, safeFilename } from './util';
@@ -15,18 +16,42 @@ function isCsvLike(filename: string, mimeType: string): boolean {
   return /^text\/(csv|tab-separated-values)/i.test(mimeType);
 }
 
+/**
+ * Advisory page count for a document's vault row (sprint 11). PDFs only —
+ * pages aren't a meaningful concept for anything else, so non-PDFs are null,
+ * not zero. A PDF that can't be read (encrypted, corrupt) is null too: the
+ * count is unknown and stays unknown rather than becoming a guess. Never
+ * throws — the count is advisory metadata, and computing it must never fail
+ * a storage path that would otherwise have succeeded. Shared by the upload
+ * path below and the mail-in feed's storeAttachment (worker/email/ingest.ts).
+ * Mime match is case-insensitive but exact (no parameters) — same shape the
+ * rest of the codebase pins for 'application/pdf'.
+ */
+export async function computePdfPageCount(
+  mimeType: string,
+  bytes: ArrayBuffer | Uint8Array,
+): Promise<number | null> {
+  if (mimeType.toLowerCase() !== 'application/pdf') return null;
+  try {
+    return await countPdfPages(bytes);
+  } catch {
+    return null;
+  }
+}
+
 /** Shared with the mail-in feed (worker/email/ingest.ts) — one row shape, one upsert. */
 export async function insertDocumentRow(db: D1Database, doc: DocumentMeta, source: string): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO documents (id, filename, mimeType, size, objectKey, status, source, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO documents (id, filename, mimeType, size, objectKey, status, source, createdAt, pageCount)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(objectKey) DO UPDATE SET
          filename = excluded.filename,
          mimeType = excluded.mimeType,
          size = excluded.size,
          status = excluded.status,
-         createdAt = excluded.createdAt`,
+         createdAt = excluded.createdAt,
+         pageCount = excluded.pageCount`,
     )
     .bind(
       doc.id,
@@ -37,6 +62,7 @@ export async function insertDocumentRow(db: D1Database, doc: DocumentMeta, sourc
       doc.status,
       source,
       doc.createdAt,
+      doc.pageCount,
     )
     .run();
 }
@@ -131,6 +157,7 @@ export async function uploadDocuments(env: Env, form: FormData): Promise<UploadR
       status,
       source: 'upload',
       createdAt: new Date().toISOString(),
+      pageCount: await computePdfPageCount(mimeType, bytes),
     };
     try {
       await insertDocumentRow(env.DB, doc, 'upload');

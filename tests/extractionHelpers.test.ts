@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MULTI_PAGE_EXTRACT_HINT,
+  STATEMENT_LIKE_PDF_MIN_PAGES,
   buildTxInputFromDraft,
   isDocumentExtractable,
   isLowConfidence,
   isRealDateISO,
+  receiptErrorWithHint,
+  receiptExtractOffered,
   resolveCategorySuggestion,
   seedExtractionDraft,
   validateExtractionDraft,
@@ -72,6 +76,48 @@ describe('isDocumentExtractable', () => {
   it('excludes everything else', () => {
     expect(isDocumentExtractable('text/csv')).toBe(false);
     expect(isDocumentExtractable('application/vnd.ms-excel')).toBe(false);
+  });
+});
+
+describe('receiptExtractOffered — a 3+-page PDF is not a receipt (sprint 11)', () => {
+  it('offers the receipt path for 1-2 page PDFs (a short PDF can be an invoice)', () => {
+    expect(receiptExtractOffered('application/pdf', 1)).toBe(true);
+    expect(receiptExtractOffered('application/pdf', 2)).toBe(true);
+  });
+
+  it('hides the receipt path at exactly the pinned threshold and above', () => {
+    expect(STATEMENT_LIKE_PDF_MIN_PAGES).toBe(3);
+    expect(receiptExtractOffered('application/pdf', 3)).toBe(false);
+    expect(receiptExtractOffered('application/pdf', 12)).toBe(false); // the incident shape
+  });
+
+  it('a null (unknown) count keeps both buttons — pre-migration docs keep working', () => {
+    expect(receiptExtractOffered('application/pdf', null)).toBe(true);
+  });
+
+  it('never gates non-PDFs, whatever the count field says', () => {
+    expect(receiptExtractOffered('image/jpeg', null)).toBe(true);
+    // A non-PDF can only ever carry null, but the gate must not depend on it.
+    expect(receiptExtractOffered('image/jpeg', 12)).toBe(true);
+    expect(receiptExtractOffered('text/csv', null)).toBe(true);
+  });
+});
+
+describe('receiptErrorWithHint — failed receipt runs on multi-page PDFs point at the right door', () => {
+  it('appends the statement hint when the PDF is known multi-page', () => {
+    expect(receiptErrorWithHint('The extraction timed out.', 'application/pdf', 12)).toBe(
+      `The extraction timed out. ${MULTI_PAGE_EXTRACT_HINT}`,
+    );
+    expect(receiptErrorWithHint('Failed.', 'application/pdf', 3)).toContain(
+      'Use Read as statement instead.',
+    );
+  });
+
+  it('leaves the message alone when the receipt path was a legitimate choice', () => {
+    expect(receiptErrorWithHint('Failed.', 'application/pdf', 2)).toBe('Failed.');
+    // Unknown is not "multi-page": null counts never earn the hint.
+    expect(receiptErrorWithHint('Failed.', 'application/pdf', null)).toBe('Failed.');
+    expect(receiptErrorWithHint('Failed.', 'image/png', null)).toBe('Failed.');
   });
 });
 

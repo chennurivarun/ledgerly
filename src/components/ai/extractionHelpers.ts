@@ -43,6 +43,51 @@ export function isDocumentExtractable(mimeType: string): boolean {
   return mimeType.startsWith('image/') || mimeType === 'application/pdf';
 }
 
+/**
+ * A PDF with this many pages or more is not a receipt (sprint 11). A receipt
+ * is one purchase — a 1-2 page PDF can still legitimately be a receipt or a
+ * compact invoice, but at 3+ pages the document is a statement (or something
+ * else entirely), and the single-receipt path would send the WHOLE file to
+ * the provider as ONE job: the live incident behind this threshold was a
+ * 12-page bank statement clicked through "Extract" and timing out exactly
+ * that way. Pinned at 3, not 2, so short invoices keep the receipt button.
+ */
+export const STATEMENT_LIKE_PDF_MIN_PAGES = 3;
+
+/**
+ * Whether the single-receipt Extract action may be offered for a document.
+ * Gates VISIBILITY only — the server contract is untouched. A null pageCount
+ * means unknown (non-PDF, a pre-migration row, or an unreadable PDF) and
+ * keeps BOTH buttons: never-guess means an unknown count is not evidence the
+ * document is multi-page, and pre-migration docs must keep working. Non-PDFs
+ * have no page concept and are never gated here.
+ */
+export function receiptExtractOffered(mimeType: string, pageCount: number | null): boolean {
+  if (mimeType !== 'application/pdf') return true;
+  if (pageCount === null) return true;
+  return pageCount < STATEMENT_LIKE_PDF_MIN_PAGES;
+}
+
+/** Appended to receipt-extraction failures on a known-multi-page PDF. */
+export const MULTI_PAGE_EXTRACT_HINT = 'Multi-page PDF? Use Read as statement instead.';
+
+/**
+ * A receipt-extraction error, with a redirect hint appended when the document
+ * is a PDF known to be too long for the receipt path. Exists for legacy rows
+ * mid-flight: an extraction started before the gate (or from a stale client
+ * that didn't know the count yet) can still fail through the receipt path,
+ * and its error should point at the button that will actually work. Unknown
+ * (null) counts get no hint — unknown is not "multi-page".
+ */
+export function receiptErrorWithHint(
+  message: string,
+  mimeType: string,
+  pageCount: number | null,
+): string {
+  if (receiptExtractOffered(mimeType, pageCount)) return message;
+  return `${message} ${MULTI_PAGE_EXTRACT_HINT}`;
+}
+
 /** Real calendar-date check for YYYY-MM-DD strings (mirrors shared/format's local-date construction — no timezone surprises, catches e.g. Feb 30). */
 export function isRealDateISO(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;

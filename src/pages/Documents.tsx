@@ -17,7 +17,11 @@ import {
 } from '../../shared/types';
 import { api } from '../api';
 import { ExtractionReviewModal } from '../components/ai/ExtractionReviewModal';
-import { isDocumentExtractable } from '../components/ai/extractionHelpers';
+import {
+  isDocumentExtractable,
+  receiptErrorWithHint,
+  receiptExtractOffered,
+} from '../components/ai/extractionHelpers';
 import {
   missingKeyProvider,
   preflightCostLine,
@@ -584,9 +588,20 @@ export default function Documents() {
               // off (otherwise a 'suggested' extraction from before the user
               // turned AI off would dangle: a chip with no way to act on it).
               const showReview = mimeOk && extraction?.status === 'suggested';
-              // Starting a NEW extraction needs a ready provider (a key, if anthropic).
+              // Starting a NEW extraction needs a ready provider (a key, if
+              // anthropic) AND a document the receipt path can plausibly
+              // read: a PDF with a known page count of 3+ is a statement,
+              // not a receipt, so its Extract button is hidden entirely
+              // (sprint 11 — the receipt path sends the whole PDF as one
+              // job). This deliberately overrides the "every non-terminal
+              // status keeps an escape hatch" rule above for those PDFs:
+              // their escape hatch IS "Read as statement", which stays
+              // primary on every PDF. A null (unknown) count hides nothing.
               const showExtract =
-                aiReady && mimeOk && (!extraction || REEXTRACTABLE_STATUSES.includes(extraction.status));
+                aiReady &&
+                mimeOk &&
+                receiptExtractOffered(doc.mimeType, doc.pageCount) &&
+                (!extraction || REEXTRACTABLE_STATUSES.includes(extraction.status));
 
               // Statement path: PDF only (spec — the receipt path above stays
               // for one-purchase PDFs; images get receipt only). Same
@@ -627,11 +642,24 @@ export default function Documents() {
                       {doc.source === 'google-drive' ? 'Google Drive' : 'Upload'} · {fmtDate(doc.createdAt.slice(0, 10))}
                     </p>
                     {extraction?.status === 'failed' && (
+                      // Both receipt-error surfaces (this persistent one and
+                      // the transient one below) carry the multi-page hint
+                      // when the count says the receipt path was the wrong
+                      // door — legacy rows that failed before the Extract
+                      // button was gated still get pointed the right way.
                       <p className="mt-0.5 text-xs text-danger">
-                        {extraction.error ?? 'Extraction failed — try again.'}
+                        {receiptErrorWithHint(
+                          extraction.error ?? 'Extraction failed — try again.',
+                          doc.mimeType,
+                          doc.pageCount,
+                        )}
                       </p>
                     )}
-                    {extractError?.id === doc.id && <p className="mt-0.5 text-xs text-danger">{extractError.message}</p>}
+                    {extractError?.id === doc.id && (
+                      <p className="mt-0.5 text-xs text-danger">
+                        {receiptErrorWithHint(extractError.message, doc.mimeType, doc.pageCount)}
+                      </p>
+                    )}
                     {statement?.status === 'failed' && (
                       <p className="mt-0.5 text-xs text-danger">
                         {statement.error ?? 'Could not read this statement — try again.'}

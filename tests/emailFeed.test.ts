@@ -4,6 +4,7 @@
 //
 // No network anywhere. Raw messages are string fixtures pushed through the
 // real postal-mime; the fakes below stand in for D1 and R2.
+import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { txFingerprint } from '../shared/fingerprint';
 import { MAX_INBOX_EMAILS_PER_DAY } from '../shared/types';
@@ -388,6 +389,7 @@ function fakeDb(seed: Partial<Tables> = {}, hooks: Hooks = {}) {
         status: args[5],
         source: args[6],
         createdAt: args[7],
+        pageCount: args[8],
       });
       return { rows: [], changes: 1 };
     }
@@ -778,6 +780,33 @@ describe('ingestRawEmail — attachments land as plain vault documents, no AI', 
     expect(puts).toHaveLength(1);
     expect(puts[0].key).toMatch(/^email-inbox\//);
     expect(puts[0].contentType).toBe('application/pdf');
+  });
+
+  it('records the page count of a readable PDF attachment (sprint 11)', async () => {
+    const pdf = await PDFDocument.create();
+    pdf.addPage([100, 200]);
+    pdf.addPage([100, 200]);
+    const bytes = await pdf.save({ useObjectStreams: false });
+    const { env, tables } = fakeEnv({ settings: feedSettings(true, ['@chase.com']) });
+    const raw = rawEmailWithAttachment({
+      filename: 'statement.pdf',
+      contentB64: btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join('')),
+    });
+    const result = await ingestRawEmail(env, raw, 'no-reply@chase.com');
+    expect(result.ok).toBe('ingested');
+    expect(tables.documents).toHaveLength(1);
+    expect(tables.documents[0].pageCount).toBe(2);
+  });
+
+  it('stores an unreadable PDF attachment with a null pageCount — the count never sinks the storage', async () => {
+    // The default PDF_B64 fixture is a real-looking header with no xref:
+    // pdf-lib cannot parse it, so its page count is unknown. Unknown stays
+    // null, and the document row still lands in the vault regardless.
+    const { env, tables } = fakeEnv({ settings: feedSettings(true, ['@chase.com']) });
+    const result = await ingestRawEmail(env, rawEmailWithAttachment(), 'no-reply@chase.com');
+    expect(result.ok).toBe('ingested');
+    expect(tables.documents).toHaveLength(1);
+    expect(tables.documents[0].pageCount).toBeNull();
   });
 
   it('skips cid-referenced logo images — a bank logo is not a document', async () => {
