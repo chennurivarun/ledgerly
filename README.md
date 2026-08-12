@@ -101,6 +101,20 @@ Two providers, off by default:
 Extraction only ever *suggests* — you review and confirm every transaction,
 and the same duplicate detection applies as for any other import.
 
+### The mail-in feed — bank sync with no bank connection
+
+Your bank already emails you transaction alerts, e-receipts, and statements.
+Route them to an address you control (Cloudflare Email Routing → your own
+Worker, or any mail pipe via the token-guarded HTTP door) and they become
+proposed transactions in seconds — **no bank credentials, no aggregator, no
+Plaid, works with any bank that can send an email.**
+
+Security model, in one line: only allow-listed senders are accepted, nothing
+is imported without your review, and inbound email never triggers AI. The
+allowlist starts empty, so a fresh install ingests nothing. Parsing is
+deterministic — bank formats are community-contributed parser packs (code,
+not data). Setup guide: [docs/EMAIL-FEED.md](docs/EMAIL-FEED.md).
+
 ### Scheduled imports
 
 `GET/POST /api/drive-sync` implements a complete import contract

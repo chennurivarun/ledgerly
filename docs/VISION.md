@@ -122,6 +122,19 @@ comfortable letting AI make financial decisions autonomously).
    the user's own Meta Business Cloud API credentials. Anomaly alerts still
    to come.*
 
+### The mail-in feed — the anti-Plaid ✅ *(shipped August 2026)*
+
+The structural bet the deployment model makes possible: your bank's own
+alert emails, e-receipts, and statements become a **credential-free,
+real-time feed** — routed to an address you control and processed entirely
+inside your own account. No aggregator, no shared bank login, any bank that
+can send an email. A cloud vendor cannot copy this without reading your
+email on their servers; Ledgerly has no servers to read it on. Bank formats
+are community-contributed parser packs — the intelligence ships as open
+code, never as pooled data. Ingestion is suggestion-only, allow-listed, and
+never triggers AI, so a spoofed email can at worst propose a row the user
+rejects.
+
 ### Phase 3 — Sustainability and the business wedge
 
 - **Ledgerly Cloud**: first-party hosting for people who don't want to
