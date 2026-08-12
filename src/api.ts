@@ -148,6 +148,17 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
+  /** Confirm a (possibly user-edited) mail-in proposal → creates the transaction. */
+  confirmInboxEmail: (id: string, input: TxInput) =>
+    request<BatchInsertResult>(`/api/inbox/${encodeURIComponent(id)}/confirm`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify(input),
+    }),
+
+  dismissInboxEmail: (id: string) =>
+    request<{ ok: true }>(`/api/inbox/${encodeURIComponent(id)}/dismiss`, { method: 'POST' }),
+
   /** Compute today's briefing without sending anything. */
   previewBriefing: () => request<BriefingPreview>('/api/briefings/preview'),
 

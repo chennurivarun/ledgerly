@@ -16,7 +16,7 @@ import { isIsoDate, isRecord, normalizeNames } from './util';
 export const DEFAULT_ACCOUNT = 'Imported account';
 export const MAX_BATCH = 5000;
 
-const SOURCES = new Set<TxSource>(['manual', 'csv', 'document', 'google-drive']);
+const SOURCES = new Set<TxSource>(['manual', 'csv', 'document', 'google-drive', 'email']);
 
 /** A validated row, ready to insert. Ids/timestamps are added at insert time. */
 export type ValidTx = Omit<Transaction, 'id' | 'createdAt'>;

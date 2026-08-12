@@ -78,6 +78,18 @@ export const SCHEMA_STATEMENTS = [
     key TEXT PRIMARY KEY,
     createdAt TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS inbox_emails (
+    id TEXT PRIMARY KEY,
+    messageId TEXT NOT NULL UNIQUE,
+    receivedAt TEXT NOT NULL,
+    fromAddress TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    status TEXT NOT NULL,
+    parsed TEXT,
+    documentId TEXT,
+    createdAt TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_inbox_emails_created ON inbox_emails(createdAt DESC)`,
   `CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,

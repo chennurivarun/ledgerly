@@ -3,7 +3,7 @@
 // Changing a shape here requires EM sign-off; additive changes only.
 
 export type TxType = 'expense' | 'income';
-export type TxSource = 'manual' | 'csv' | 'document' | 'google-drive';
+export type TxSource = 'manual' | 'csv' | 'document' | 'google-drive' | 'email';
 
 export interface Transaction {
   id: string;
@@ -148,6 +148,12 @@ export interface Settings {
   briefingWhatsappTokenSet: boolean;
   /** ISO timestamp of the last successful briefing send; null = never. */
   lastBriefingSentAt: string | null;
+  /** Mail-in feed (sprint 8). Off by default; with an EMPTY allowlist
+   * nothing is ever ingested — secure by default. */
+  emailFeedEnabled: boolean;
+  /** Allowed senders: exact addresses ("alerts@chase.com") or whole domains
+   * ("@chase.com"). Matching is case-insensitive on the envelope sender. */
+  emailAllowedSenders: string[];
 }
 
 export type AiProvider = 'off' | 'workers-ai' | 'anthropic';
@@ -204,6 +210,8 @@ export function defaultSettings(): Settings {
     briefingWhatsappPhoneNumberId: '',
     briefingWhatsappTokenSet: false,
     lastBriefingSentAt: null,
+    emailFeedEnabled: false,
+    emailAllowedSenders: [],
   };
 }
 
@@ -224,7 +232,50 @@ export interface StatePayload {
   statements?: StatementExtraction[];
   /** Rule suggestions learned from category corrections (sprint 5). */
   ruleSuggestions?: RuleSuggestion[];
+  /** Mail-in feed inbox (sprint 8): newest first, capped at 100. */
+  inboxEmails?: InboxEmail[];
 }
+
+// ---------------------------------------------------------------------------
+// The mail-in feed (sprint 8): bank alert emails, e-receipts and statements
+// arrive at an address the user routes into their own Worker; a deterministic
+// parser proposes transactions the user confirms. Suggestion-only, always —
+// a spoofed email can at worst propose an item the user rejects. Inbound
+// email NEVER triggers AI automatically: deterministic parsing is free and
+// safe, AI extraction on stored attachments stays a user-clicked action.
+// ---------------------------------------------------------------------------
+
+export type InboxEmailStatus = 'proposed' | 'unparsed' | 'confirmed' | 'dismissed';
+
+/** What the deterministic parser read off an alert email — plain facts only.
+ * A field the parser could not establish unambiguously makes the whole email
+ * 'unparsed' (never-guess); `date` falls back to the email's own arrival
+ * date, which is a fact, not a guess. */
+export interface InboxParsedFields {
+  date: string; // YYYY-MM-DD
+  merchant: string;
+  amount: number; // positive; direction carried by `type`
+  type: TxType;
+  /** Which parser pack matched (e.g. 'generic-en'). Community packs land here. */
+  pack: string;
+}
+
+export interface InboxEmail {
+  id: string;
+  /** Arrival time (email Date header, or ingestion time when absent). */
+  receivedAt: string; // ISO timestamp
+  from: string;
+  subject: string; // clipped server-side
+  status: InboxEmailStatus;
+  /** Parser output, or null when the email landed as 'unparsed'. */
+  parsed: InboxParsedFields | null;
+  /** Stored attachment (PDF/image routed into the documents vault), if any. */
+  documentId: string | null;
+  createdAt: string;
+}
+
+/** Per-day ingestion cap — a flood of spoofed mail cannot swamp the vault. */
+export const MAX_INBOX_EMAILS_PER_DAY = 200;
 
 // ---------------------------------------------------------------------------
 // Correction-learning rule suggestions (sprint 5, vision phase-2 item 1).
@@ -407,6 +458,9 @@ export interface PreferencesUpdate {
   /** Write-only Cloud API access token. Stored server-side, never echoed
    * back; null clears it (exactly the aiApiKey semantics). */
   briefingWhatsappToken?: string | null;
+  emailFeedEnabled?: boolean;
+  /** Full replacement list; exact addresses or "@domain" entries. */
+  emailAllowedSenders?: string[];
 }
 
 export interface PreferencesResult {

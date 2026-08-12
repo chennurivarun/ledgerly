@@ -6,6 +6,7 @@ import {
   type BatchInsertResult,
   type DocumentMeta,
   type ExtractionResult,
+  type InboxEmail,
   type PatchTxInput,
   type Period,
   type PreferencesUpdate,
@@ -53,6 +54,7 @@ interface AppStore {
   extractions: ExtractionResult[];
   statements: StatementExtraction[];
   ruleSuggestions: RuleSuggestion[];
+  inboxEmails: InboxEmail[];
   activeModal: ModalKind;
   toasts: Toast[];
 
@@ -85,6 +87,9 @@ interface AppStore {
   acceptRuleSuggestion(s: RuleSuggestion): Promise<void>;
   /** Suppress a suggestion permanently for this merchant/category pair. */
   dismissRuleSuggestion(s: RuleSuggestion): Promise<void>;
+  /** Confirm a mail-in proposal → creates the transaction. */
+  confirmInboxEmail(id: string, input: TxInput): Promise<BatchInsertResult>;
+  dismissInboxEmail(id: string): Promise<void>;
   /** Compute today's briefing server-side; throws ApiError for inline handling. */
   previewBriefing(): Promise<BriefingPreview>;
   /** Deliver today's briefing over WhatsApp; refreshes lastBriefingSentAt. */
@@ -144,6 +149,7 @@ export const useStore = create<AppStore>((set, get) => ({
   extractions: [],
   statements: [],
   ruleSuggestions: [],
+  inboxEmails: [],
   activeModal: null,
   toasts: [],
 
@@ -161,6 +167,7 @@ export const useStore = create<AppStore>((set, get) => ({
         extractions: s.extractions ?? [],
         statements: mergeStatements(st.statements, s.statements ?? []),
         ruleSuggestions: s.ruleSuggestions ?? [],
+        inboxEmails: s.inboxEmails ?? [],
       }));
     } catch (e) {
       set({ loadError: e instanceof Error ? e.message : 'Failed to load your data.' });
@@ -307,6 +314,7 @@ export const useStore = create<AppStore>((set, get) => ({
         extractions: s.extractions ?? [],
         statements: mergeStatements(st.statements, s.statements ?? []),
         ruleSuggestions: s.ruleSuggestions ?? [],
+        inboxEmails: s.inboxEmails ?? [],
       }));
     } catch {
       /* keep current state */
@@ -325,6 +333,27 @@ export const useStore = create<AppStore>((set, get) => ({
     await api.dismissRuleSuggestion({ merchant: sug.merchant, category: sug.category });
     set((st) => ({
       ruleSuggestions: st.ruleSuggestions.filter((x) => x.id !== sug.id),
+    }));
+  },
+
+  async confirmInboxEmail(id, input) {
+    const res = await api.confirmInboxEmail(id, input);
+    if (res.insertedRows.length > 0) {
+      set((st) => ({
+        transactions: sortTransactions([...st.transactions, ...res.insertedRows]),
+      }));
+    }
+    // Server flips the inbox item's status; pull fresh state rather than guessing.
+    void get().refreshQuiet();
+    return res;
+  },
+
+  async dismissInboxEmail(id) {
+    await api.dismissInboxEmail(id);
+    set((st) => ({
+      inboxEmails: st.inboxEmails.map((e) =>
+        e.id === id ? { ...e, status: 'dismissed' as const } : e,
+      ),
     }));
   },
 
