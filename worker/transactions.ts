@@ -119,7 +119,8 @@ export function partitionByFingerprint<T extends { fingerprint: string }>(
   return { fresh, duplicates };
 }
 
-function isUniqueViolation(err: unknown): boolean {
+/** Shared with the inbox pipeline: its messageId UNIQUE race reads the same way. */
+export function isUniqueViolation(err: unknown): boolean {
   const message =
     err instanceof Error
       ? `${err.message} ${err.cause instanceof Error ? err.cause.message : ''}`

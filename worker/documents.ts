@@ -15,7 +15,8 @@ function isCsvLike(filename: string, mimeType: string): boolean {
   return /^text\/(csv|tab-separated-values)/i.test(mimeType);
 }
 
-async function insertDocumentRow(db: D1Database, doc: DocumentMeta, source: string): Promise<void> {
+/** Shared with the mail-in feed (worker/email/ingest.ts) — one row shape, one upsert. */
+export async function insertDocumentRow(db: D1Database, doc: DocumentMeta, source: string): Promise<void> {
   await db
     .prepare(
       `INSERT INTO documents (id, filename, mimeType, size, objectKey, status, source, createdAt)
@@ -200,6 +201,11 @@ export async function deleteDocument(env: Env, id: string): Promise<void> {
   // AI suggestion rows are keyed to this document and unreachable once it is
   // gone (every read path scopes to live documents) — remove them with it so
   // deleted statements don't accumulate up to 300 orphaned rows each.
+  //
+  // inbox_emails rows pointing at this document are deliberately NOT swept and
+  // their documentId is left as-is (EM ruling, sprint 8): the email record is
+  // the audit trail of what arrived, and the UI treats a missing document
+  // gracefully.
   await env.DB.batch([
     env.DB.prepare('DELETE FROM documents WHERE id = ?').bind(id),
     env.DB.prepare('DELETE FROM extractions WHERE documentId = ?').bind(id),

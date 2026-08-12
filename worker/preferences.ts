@@ -16,6 +16,7 @@ import {
   type Settings,
   type Tag,
 } from '../shared/types';
+import { normalizeAllowedSenders } from './email/ingest';
 import { readRules, readTags } from './queries';
 import {
   clearAiApiKey,
@@ -332,6 +333,19 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
         'briefingWhatsappToken must be a non-empty token, or null to remove the stored token.',
       );
     }
+  }
+
+  // The mail-in feed (sprint 8). Both fields are plain settings — the security
+  // work happens at ingestion time (worker/email/ingest.ts), which re-reads
+  // them on every message; disabled or empty-allowlist means nothing ingests.
+  if ('emailFeedEnabled' in body) {
+    if (typeof body.emailFeedEnabled !== 'boolean') {
+      throw new ApiFail(400, 'emailFeedEnabled must be true or false.');
+    }
+    patch.emailFeedEnabled = body.emailFeedEnabled;
+  }
+  if ('emailAllowedSenders' in body) {
+    patch.emailAllowedSenders = normalizeAllowedSenders(body.emailAllowedSenders);
   }
 
   // Tags and rules live in their own tables; everything else is a settings row.
