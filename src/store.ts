@@ -15,6 +15,7 @@ import {
   type Settings,
   type StatementConfirmInput,
   type StatementExtraction,
+  type StatementPreflight,
   type StatementJobStatus,
   type Tag,
   type Transaction,
@@ -78,6 +79,8 @@ interface AppStore {
   /** Confirm a (possibly edited) extraction → creates the transaction. */
   confirmExtraction(id: string, input: TxInput): Promise<BatchInsertResult>;
   dismissExtraction(id: string): Promise<void>;
+  /** Pages/batches/cost a statement read will involve; throws ApiError. */
+  statementPreflight(id: string): Promise<StatementPreflight>;
   /** Read a PDF statement into proposed rows; inserts nothing. */
   extractStatement(id: string): Promise<StatementExtraction>;
   /** Import the user-selected (possibly edited) rows. */
@@ -271,6 +274,10 @@ export const useStore = create<AppStore>((set, get) => ({
         e.documentId === id ? { ...e, status: 'dismissed' as const } : e,
       ),
     }));
+  },
+
+  async statementPreflight(id) {
+    return api.statementPreflight(id);
   },
 
   async extractStatement(id) {

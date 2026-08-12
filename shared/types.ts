@@ -137,6 +137,11 @@ export interface Settings {
   /** Whether a BYOK API key is stored. The key itself is write-only — it is
    * NEVER returned by any endpoint. */
   aiKeySet: boolean;
+  /** Whether a Sarvam API key is stored. Write-only, NEVER echoed. */
+  sarvamKeySet: boolean;
+  /** User-entered Sarvam per-page price (their dashboard rate) for honest
+   * cost estimates; null = no estimate shown, never a guessed price. */
+  sarvamPricePerPage: number | null;
   /** Proactive briefings (sprint 7, vision phase-2 item 6). Off by default. */
   briefingsEnabled: boolean;
   briefingCadence: BriefingCadence;
@@ -156,7 +161,7 @@ export interface Settings {
   emailAllowedSenders: string[];
 }
 
-export type AiProvider = 'off' | 'workers-ai' | 'anthropic';
+export type AiProvider = 'off' | 'workers-ai' | 'anthropic' | 'sarvam';
 
 export type BriefingCadence = 'daily' | 'weekly';
 
@@ -204,6 +209,8 @@ export function defaultSettings(): Settings {
     aiProvider: 'off',
     aiModel: null,
     aiKeySet: false,
+    sarvamKeySet: false,
+    sarvamPricePerPage: null,
     briefingsEnabled: false,
     briefingCadence: 'weekly',
     briefingWhatsappRecipient: '',
@@ -298,6 +305,20 @@ export interface RuleSuggestion {
   evidenceCount: number;
   /** ISO timestamp of the most recent agreeing correction. */
   lastSeen: string;
+}
+
+/**
+ * GET /api/documents/:id/statement/preflight (sprint 10) — what a statement
+ * read will involve, BEFORE anything is sent to a model. estimatedCost is
+ * present only when the user saved their own per-page price.
+ */
+export interface StatementPreflight {
+  pages: number;
+  batches: number;
+  provider: AiProvider;
+  /** pages × sarvamPricePerPage, rounded to 2dp; null when no price saved
+   * or the provider does not bill per page (anthropic). */
+  estimatedCost: number | null;
 }
 
 /** Body for POST /api/rule-suggestions/accept and /dismiss. */
@@ -450,6 +471,9 @@ export interface PreferencesUpdate {
   aiModel?: string | null;
   /** Write-only BYOK key. Stored server-side, never echoed back; null clears it. */
   aiApiKey?: string | null;
+  /** Write-only Sarvam key; null clears (aiApiKey semantics). */
+  sarvamApiKey?: string | null;
+  sarvamPricePerPage?: number | null;
   briefingsEnabled?: boolean;
   briefingCadence?: BriefingCadence;
   /** E.164 digits without '+', or '' to clear. */

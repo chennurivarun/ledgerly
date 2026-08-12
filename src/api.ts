@@ -14,6 +14,7 @@ import {
   type RuleSuggestionActionInput,
   type StatementConfirmInput,
   type StatementExtraction,
+  type StatementPreflight,
   type StatePayload,
   type Transaction,
   type TxInput,
@@ -112,6 +113,12 @@ export const api = {
     request<{ ok: true }>(`/api/documents/${encodeURIComponent(id)}/extraction/dismiss`, {
       method: 'POST',
     }),
+
+  /** What a statement read will involve — pages, batches, honest cost. */
+  statementPreflight: (id: string) =>
+    request<StatementPreflight>(
+      `/api/documents/${encodeURIComponent(id)}/statement/preflight`,
+    ),
 
   /** Read a PDF statement into many proposed rows. Inserts nothing. */
   extractStatement: (id: string) =>
