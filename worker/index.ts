@@ -13,6 +13,8 @@ import {
 import { computeBriefing, runScheduledBriefing, sendBriefingNow } from './briefings';
 import { deleteDocument, downloadDocument, uploadDocuments } from './documents';
 import { readDriveStatus, runDriveSync } from './drive';
+import { ingestRawEmail, MAX_INBOUND_EMAIL_BYTES } from './email/ingest';
+import { confirmInboxEmail, dismissInboxEmail, readInboxEmails } from './email/inbox';
 import {
   confirmExtraction,
   dismissExtraction,
@@ -43,7 +45,7 @@ import {
   readTransaction,
   registerTags,
 } from './transactions';
-import { ApiFail, isRecord, normalizeNames, safeEqual } from './util';
+import { ApiFail, clip, isRecord, normalizeNames, safeEqual } from './util';
 
 type App = { Bindings: Env };
 const app = new Hono<App>();
@@ -72,12 +74,13 @@ app.use('/api/*', async (c, next) => {
 
 app.get('/api/state', async (c) => {
   const db = c.env.DB;
-  const [transactions, tags, rules, settings, documents] = await Promise.all([
+  const [transactions, tags, rules, settings, documents, inboxEmails] = await Promise.all([
     readTransactions(db),
     readTags(db),
     readRules(db),
     readSettings(db),
     readDocuments(db),
+    readInboxEmails(db),
   ]);
   // Extractions and statement jobs are scoped to the documents just returned,
   // so these reads are bounded by the same cap rather than growing with the vault.
@@ -98,6 +101,7 @@ app.get('/api/state', async (c) => {
     extractions,
     statements,
     ruleSuggestions,
+    inboxEmails,
   };
   return c.json(payload);
 });
@@ -118,6 +122,7 @@ app.delete('/api/state', async (c) => {
     db.prepare('DELETE FROM statement_rows'),
     db.prepare('DELETE FROM category_corrections'),
     db.prepare('DELETE FROM rule_suggestion_dismissals'),
+    db.prepare('DELETE FROM inbox_emails'),
     db.prepare('DELETE FROM rules'),
     db.prepare('DELETE FROM tags'),
     // Clears both stored secrets with everything else — the BYOK key
@@ -389,6 +394,37 @@ app.post('/api/drive-sync', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// The mail-in feed (VISION.md phase 2, sprint 8). Ingestion is suggestion-only
+// — nothing here writes a transaction; /api/inbox/:id/confirm is the only
+// path that does, and only for the row the user reviewed.
+// ---------------------------------------------------------------------------
+
+/**
+ * The HTTP door into the same pipeline the Cloudflare email() handler feeds:
+ * local dev, CI and non-Cloudflare mail pipes POST the raw RFC-822 message
+ * here. Same optional bearer gating as /api/drive-sync; `?from=` overrides
+ * the envelope sender for pipes that know it (the From header is used
+ * otherwise). The discriminated pipeline result is the response body —
+ * rejections are 400s with honest reasons.
+ */
+app.post('/api/inbound-email', async (c) => {
+  requireSyncToken(c);
+  const raw = await c.req.arrayBuffer();
+  const from = c.req.query('from')?.trim() || null;
+  const result = await ingestRawEmail(c.env, raw, from);
+  return c.json(result, result.ok === false ? 400 : 200);
+});
+
+app.post('/api/inbox/:id/confirm', async (c) =>
+  c.json(await confirmInboxEmail(c.env.DB, c.req.param('id'), await readJson(c))),
+);
+
+app.post('/api/inbox/:id/dismiss', async (c) => {
+  await dismissInboxEmail(c.env.DB, c.req.param('id'));
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
 // Proactive briefings (VISION.md phase-2 item 6, sprint 7)
 // ---------------------------------------------------------------------------
 
@@ -453,5 +489,33 @@ async function scheduled(
   );
 }
 
-// Hono keeps serving fetch; the scheduled handler rides alongside it.
-export default { fetch: app.fetch, scheduled };
+/**
+ * Cloudflare Email Routing door (docs/EMAIL-FEED.md). Deploy-only and kept
+ * deliberately thin: its logic IS the tested ingestRawEmail pipeline, and the
+ * local/CI door for the same pipeline is POST /api/inbound-email. Rejections
+ * become permanent SMTP errors via setReject, so a blocked sender's mail
+ * bounces instead of silently vanishing.
+ */
+async function email(
+  message: ForwardableEmailMessage,
+  env: Env,
+  _ctx: ExecutionContext,
+): Promise<void> {
+  // The /api/* middleware is not on this path — ensure tables exist.
+  await ensureSchema(env.DB);
+  // Reject oversized mail before buffering the stream at all.
+  if (message.rawSize > MAX_INBOUND_EMAIL_BYTES) {
+    message.setReject('Message is larger than 5 MB.');
+    return;
+  }
+  const raw = await new Response(message.raw).arrayBuffer();
+  const result = await ingestRawEmail(env, raw, message.from ?? null);
+  // Expected rejections become PERMANENT SMTP errors; an unexpected throw is
+  // deliberately left to propagate — the runtime answers with a temporary
+  // failure and the sending server retries, which is what a transient D1
+  // blip deserves. Nothing here logs headers or content (spec §20).
+  if (result.ok === false) message.setReject(clip(result.reason));
+}
+
+// Hono keeps serving fetch; the scheduled + email handlers ride alongside it.
+export default { fetch: app.fetch, scheduled, email };
