@@ -99,6 +99,7 @@ interface DocRow {
   status: string;
   source: string;
   createdAt: string;
+  pageCount: number | null;
 }
 
 function rowToDocument(row: DocRow): DocumentMeta {
@@ -111,6 +112,9 @@ function rowToDocument(row: DocRow): DocumentMeta {
     status: (row.status as DocumentMeta['status']) ?? 'review',
     source: (row.source as DocumentMeta['source']) ?? 'upload',
     createdAt: row.createdAt,
+    // Pre-migration rows are NULL in D1; anything non-numeric stays null
+    // (unknown), never a made-up count.
+    pageCount: typeof row.pageCount === 'number' ? row.pageCount : null,
   };
 }
 
@@ -118,7 +122,7 @@ function rowToDocument(row: DocRow): DocumentMeta {
 export async function readDocuments(db: D1Database): Promise<DocumentMeta[]> {
   const { results } = await db
     .prepare(
-      `SELECT id, filename, mimeType, size, objectKey, status, source, createdAt
+      `SELECT id, filename, mimeType, size, objectKey, status, source, createdAt, pageCount
        FROM documents ORDER BY createdAt DESC LIMIT 100`,
     )
     .all<DocRow>();

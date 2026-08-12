@@ -45,6 +45,14 @@ export interface DocumentMeta {
   status: DocStatus;
   source: DocSource;
   createdAt: string;
+  /**
+   * PDF page count, measured once at upload/ingest time (sprint 11). null =
+   * unknown: a non-PDF (pages aren't a meaningful concept), a row stored
+   * before the column existed, or a PDF that could not be read (encrypted or
+   * corrupt). Unknown stays null — a count is never guessed or backfilled —
+   * and consumers must treat null as "don't gate on pages", not as zero.
+   */
+  pageCount: number | null;
 }
 
 export type Period =

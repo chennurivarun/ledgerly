@@ -98,9 +98,39 @@ export const SCHEMA_STATEMENTS = [
     objectKey TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL,
     source TEXT NOT NULL,
-    createdAt TEXT NOT NULL
+    createdAt TEXT NOT NULL,
+    pageCount INTEGER
   )`,
 ];
+
+/**
+ * Lightweight migrations (sprint 11 — first one in the codebase; keep the
+ * pattern exemplary). CREATE TABLE IF NOT EXISTS cannot add a column to a
+ * table that already exists, so a column added after its table shipped needs
+ * an ALTER of its own. The pattern:
+ *
+ * - One `ALTER TABLE … ADD COLUMN` per added column, nullable with no
+ *   default, so pre-existing rows read as NULL ("unknown") — never a guessed
+ *   value.
+ * - The column ALSO appears (last — matching where ALTER appends it) in the
+ *   CREATE TABLE above, so a fresh database and the wipe path are complete
+ *   without the ALTER ever succeeding.
+ * - The ALTER runs unconditionally on every ensureSchema; SQLite's
+ *   "duplicate column name" error is the idempotence signal and is swallowed.
+ *   Anything else re-throws — a migration that fails for a real reason must
+ *   be loud, not silently skipped.
+ */
+const MIGRATION_STATEMENTS = ['ALTER TABLE documents ADD COLUMN pageCount INTEGER'];
+
+/** The one ALTER outcome that means "already migrated" (D1 wraps the SQLite
+ * message, so match the substring on the error and its cause). */
+function isDuplicateColumn(err: unknown): boolean {
+  const message =
+    err instanceof Error
+      ? `${err.message} ${err.cause instanceof Error ? err.cause.message : ''}`
+      : String(err);
+  return /duplicate column/i.test(message);
+}
 
 let ensured = false;
 
@@ -115,6 +145,16 @@ let ensured = false;
 export async function ensureSchema(db: D1Database, opts: { force?: boolean } = {}): Promise<void> {
   if (ensured && !opts.force) return; // per-isolate memo; statements are idempotent anyway
   await db.batch(SCHEMA_STATEMENTS.map((s) => db.prepare(s)));
+  // Migrations run after the CREATEs: on a fresh database the ALTER hits the
+  // duplicate-column signal immediately (the CREATE already has the column);
+  // on a pre-migration database the CREATE no-ops and the ALTER does the work.
+  for (const sql of MIGRATION_STATEMENTS) {
+    try {
+      await db.prepare(sql).run();
+    } catch (err) {
+      if (!isDuplicateColumn(err)) throw err;
+    }
+  }
   const now = new Date().toISOString();
   const defaults = defaultSettings();
   const stmt = db.prepare('INSERT OR IGNORE INTO settings (key, value, updatedAt) VALUES (?, ?, ?)');

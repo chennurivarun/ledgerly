@@ -14,7 +14,7 @@
 //   No body is persisted, no raw MIME is stored, nothing is logged.
 import PostalMime, { type Email } from 'postal-mime';
 import { MAX_FILE_BYTES, MAX_INBOX_EMAILS_PER_DAY, type DocumentMeta } from '../../shared/types';
-import { insertDocumentRow } from '../documents';
+import { computePdfPageCount, insertDocumentRow } from '../documents';
 import { readSettings } from '../settingsStore';
 import { isUniqueViolation } from '../transactions';
 import { ApiFail, clip, safeFilename } from '../util';
@@ -144,6 +144,9 @@ async function storeAttachment(env: Env, email: Email): Promise<string | null> {
     status: 'review',
     source: 'upload',
     createdAt: new Date().toISOString(),
+    // Same advisory count as the upload path: null on non-PDF or an
+    // unreadable PDF, and a failure to count never fails the storage.
+    pageCount: await computePdfPageCount(picked.mimeType, picked.bytes),
   };
   try {
     await env.BUCKET.put(doc.objectKey, picked.bytes, {
