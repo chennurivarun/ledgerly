@@ -9,4 +9,7 @@ interface Env {
   AI?: Ai;
   /** Optional bearer for /api/drive-sync; unset in local dev. Never logged. */
   SYNC_TOKEN?: string;
+  /** Optional bearer for /api/mcp; unset = open, for local dev only (the
+   * documented SYNC_TOKEN contract — see docs/MCP.md). Never logged. */
+  MCP_TOKEN?: string;
 }

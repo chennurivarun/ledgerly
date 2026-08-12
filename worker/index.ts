@@ -16,6 +16,16 @@ import { readDriveStatus, runDriveSync } from './drive';
 import { ingestRawEmail, MAX_INBOUND_EMAIL_BYTES } from './email/ingest';
 import { confirmInboxEmail, dismissInboxEmail, readInboxEmails } from './email/inbox';
 import {
+  handleMcpMessage,
+  MCP_FORBIDDEN_ORIGIN,
+  MCP_NOT_ALLOWED,
+  MCP_UNAUTHORIZED,
+  parseJsonRpcMessage,
+  rpcError,
+  type JsonRpcResponse,
+} from './mcp/protocol';
+import { bindMcpTools } from './mcp/tools';
+import {
   confirmExtraction,
   dismissExtraction,
   readExtractions,
@@ -445,6 +455,72 @@ app.post('/api/briefings/run', async (c) => {
   requireSyncToken(c);
   return c.json(await runScheduledBriefing(c.env.DB));
 });
+
+// ---------------------------------------------------------------------------
+// Read-only MCP server (VISION.md phase-2 item 5, sprint 9; docs/MCP.md).
+// Stateless Streamable HTTP, minimal-compliant: one POST = one JSON response
+// (no SSE), notifications → 202, GET → 405, Mcp-Session-Id ignored (allowed
+// for stateless servers). Errors on this endpoint are JSON-RPC-shaped, not
+// ApiFail's { error } — MCP clients should only ever parse one error shape.
+// ---------------------------------------------------------------------------
+
+/** Origins a browser page may POST from — MCP clients proper send no Origin. */
+const LOCALHOST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+function isLocalhostOrigin(origin: string): boolean {
+  try {
+    return LOCALHOST_HOSTNAMES.has(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The MCP bearer, mirroring requireSyncToken: when the MCP_TOKEN secret is
+ * configured, every request must present it; unset = open (the documented
+ * SYNC_TOKEN local-dev contract — docs/MCP.md says so loudly). Returns the
+ * 401 body instead of throwing ApiFail so the response stays JSON-RPC-shaped.
+ * The token is compared in constant time, never logged or echoed.
+ */
+function requireMcpToken(c: Context<App>): JsonRpcResponse | null {
+  const expected = c.env.MCP_TOKEN;
+  if (!expected) return null;
+  const header = c.req.header('Authorization') ?? '';
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  if (!match || !safeEqual(match[1].trim(), expected)) {
+    return rpcError(null, MCP_UNAUTHORIZED, 'Unauthorized.');
+  }
+  return null;
+}
+
+app.post('/api/mcp', async (c) => {
+  // DNS-rebinding hardening (MCP spec recommendation): a present, non-local
+  // Origin header means a browser page on someone else's origin is driving
+  // this request — reject before any processing. Server-to-server MCP
+  // clients send no Origin header at all.
+  const origin = c.req.header('Origin');
+  if (origin !== undefined && !isLocalhostOrigin(origin)) {
+    return c.json(rpcError(null, MCP_FORBIDDEN_ORIGIN, 'Origin not allowed.'), 403);
+  }
+  const unauthorized = requireMcpToken(c);
+  if (unauthorized !== null) return c.json(unauthorized, 401);
+
+  const message = parseJsonRpcMessage(await c.req.text());
+  // Protocol-level rejects (unparseable body / not a single JSON-RPC message).
+  if (message.kind === 'invalid') return c.json(message.response, 400);
+  const response = await handleMcpMessage(message, bindMcpTools(c.env));
+  // Notifications (and ignorable notifications/* strays) get no body.
+  if (response === null) return c.body(null, 202);
+  return c.json(response);
+});
+
+// No SSE stream in v1: the GET half of Streamable HTTP is declined with
+// 405 + Allow, which compliant clients treat as "POST only".
+app.get('/api/mcp', (c) =>
+  c.json(rpcError(null, MCP_NOT_ALLOWED, 'Method not allowed. POST a single JSON-RPC message.'), 405, {
+    Allow: 'POST',
+  }),
+);
 
 // ---------------------------------------------------------------------------
 
