@@ -10,6 +10,7 @@ import {
   type StatePayload,
   type WipeResult,
 } from '../shared/types';
+import { computeBriefing, runScheduledBriefing, sendBriefingNow } from './briefings';
 import { deleteDocument, downloadDocument, uploadDocuments } from './documents';
 import { readDriveStatus, runDriveSync } from './drive';
 import {
@@ -119,8 +120,9 @@ app.delete('/api/state', async (c) => {
     db.prepare('DELETE FROM rule_suggestion_dismissals'),
     db.prepare('DELETE FROM rules'),
     db.prepare('DELETE FROM tags'),
-    // Clears the stored BYOK key with everything else — it lives in this
-    // table under `aiApiKeySecret` (worker/settingsStore.ts).
+    // Clears both stored secrets with everything else — the BYOK key
+    // (`aiApiKeySecret`) and the WhatsApp token (`briefingWhatsappTokenSecret`)
+    // live in this table (worker/settingsStore.ts).
     db.prepare('DELETE FROM settings'),
   ]);
 
@@ -387,6 +389,28 @@ app.post('/api/drive-sync', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Proactive briefings (VISION.md phase-2 item 6, sprint 7)
+// ---------------------------------------------------------------------------
+
+// Config-free: computes the digest and the exact text a delivery would send,
+// without touching WhatsApp — works with zero briefing configuration.
+app.get('/api/briefings/preview', async (c) => {
+  const { briefing, text } = await computeBriefing(c.env.DB);
+  return c.json({ briefing, text });
+});
+
+// Manual send: config-gated but NOT cadence-gated (the user asked for it now).
+app.post('/api/briefings/send', async (c) => c.json(await sendBriefingNow(c.env.DB)));
+
+// External-scheduler entry — same optional bearer gating as /api/drive-sync.
+// The cadence gate inside decides whether anything is actually sent, so any
+// cron can hit this safely and idempotently.
+app.post('/api/briefings/run', async (c) => {
+  requireSyncToken(c);
+  return c.json(await runScheduledBriefing(c.env.DB));
+});
+
+// ---------------------------------------------------------------------------
 
 app.notFound((c) =>
   c.req.path.startsWith('/api/')
@@ -401,4 +425,33 @@ app.onError((err, c) => {
   return c.json({ error: 'Something went wrong on the server. Please try again.' }, 500);
 });
 
-export default app;
+/**
+ * Cron tick (wrangler.jsonc `triggers`, daily 08:00 UTC). The tick itself is
+ * dumb on purpose: the cadence + config gates in runScheduledBriefing decide
+ * whether anything is sent, so daily ticks serve the weekly cadence too.
+ */
+async function scheduled(
+  _controller: ScheduledController,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<void> {
+  ctx.waitUntil(
+    (async () => {
+      try {
+        // The /api/* middleware is not on this path — ensure tables exist.
+        await ensureSchema(env.DB);
+        await runScheduledBriefing(env.DB);
+      } catch (err) {
+        // Message only — never a payload or credential (spec §20; the
+        // whatsapp taxonomy already dropped anything sensitive).
+        console.error(
+          '[ledgerly] scheduled briefing failed:',
+          err instanceof Error ? err.message : 'unknown',
+        );
+      }
+    })(),
+  );
+}
+
+// Hono keeps serving fetch; the scheduled handler rides alongside it.
+export default { fetch: app.fetch, scheduled };

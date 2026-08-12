@@ -33,5 +33,10 @@
     "binding": "AI",
     "remote": true
   },
+  // Daily 08:00 UTC tick for proactive briefings. The cadence/config gates in
+  // worker/briefings.ts decide whether a tick actually sends anything, so this
+  // one schedule serves both the daily and weekly cadences. Local `npm run dev`
+  // ignores triggers (no scheduler in the vite plugin) — unaffected.
+  "triggers": { "crons": ["0 8 * * *"] },
   "observability": { "enabled": true }
 }

@@ -15,6 +15,17 @@ export const MAX_PROCESSED_FILE_IDS = 5000;
  */
 export const AI_KEY_SECRET_KEY = 'aiApiKeySecret';
 
+/**
+ * Where the WhatsApp Cloud API access token is stored. Same containment as
+ * the BYOK key above: NOT a `defaultSettings()` key, so `readSettings` can
+ * never copy it into a payload; `Settings.briefingWhatsappTokenSet` is
+ * derived from its presence instead.
+ */
+export const BRIEFING_TOKEN_SECRET_KEY = 'briefingWhatsappTokenSecret';
+
+/** Every write-only settings row. Grows here, and ONLY here, per secret. */
+const SECRET_KEYS = [AI_KEY_SECRET_KEY, BRIEFING_TOKEN_SECRET_KEY] as const;
+
 interface SettingRow {
   key: string;
   value: string;
@@ -50,11 +61,16 @@ export async function readSettings(db: D1Database): Promise<Settings> {
   const { results } = await db.prepare('SELECT key, value FROM settings').all<SettingRow>();
   const out = defaultSettings() as unknown as Record<string, unknown>;
   let keyStored = false;
+  let briefingTokenStored = false;
   for (const row of results ?? []) {
-    // The BYOK key is the one row we read but never copy: only the boolean
+    // Secrets are the rows we read but never copy: only the boolean
     // "is there one" escapes this loop.
     if (row.key === AI_KEY_SECRET_KEY) {
       keyStored = decodeSecret(row.value) !== null;
+      continue;
+    }
+    if (row.key === BRIEFING_TOKEN_SECRET_KEY) {
+      briefingTokenStored = decodeSecret(row.value) !== null;
       continue;
     }
     if (!(row.key in out)) continue; // internal keys stay out of the client payload
@@ -66,32 +82,38 @@ export async function readSettings(db: D1Database): Promise<Settings> {
     }
     if (shapeOk(parsed, out[row.key])) out[row.key] = parsed;
   }
-  // Always derived, never read from its own row — a stored `aiKeySet` could
-  // drift out of step with the actual secret, and this flag gates the UI's
-  // "key saved" state.
+  // Always derived, never read from their own rows — a stored `aiKeySet` or
+  // `briefingWhatsappTokenSet` could drift out of step with the actual
+  // secret, and these flags gate the UI's "saved" state.
   out.aiKeySet = keyStored;
+  out.briefingWhatsappTokenSet = briefingTokenStored;
   return out as unknown as Settings;
 }
 
 /**
  * Last line of defence before settings are serialized. `readSettings` already
- * cannot emit the secret; this makes that a property of the response builder
- * too, so adding `aiApiKeySecret` to `defaultSettings()` some day would not
- * silently start leaking it.
+ * cannot emit a secret; this makes that a property of the response builder
+ * too, so adding a secret key to `defaultSettings()` some day would not
+ * silently start leaking it. Covers EVERY key in SECRET_KEYS — the name
+ * predates the second secret and stays for call-site stability.
  */
 export function redactAiSecret(settings: Settings): Settings {
   const copy: Record<string, unknown> = { ...(settings as unknown as Record<string, unknown>) };
-  delete copy[AI_KEY_SECRET_KEY];
+  for (const key of SECRET_KEYS) delete copy[key];
   return copy as unknown as Settings;
+}
+
+async function readSecret(db: D1Database, key: string): Promise<string | null> {
+  const row = await db
+    .prepare('SELECT value FROM settings WHERE key = ?')
+    .bind(key)
+    .first<{ value: string }>();
+  return row ? decodeSecret(row.value) : null;
 }
 
 /** The plaintext BYOK key, or null when none is stored. Never leaves the worker. */
 export async function readAiApiKey(db: D1Database): Promise<string | null> {
-  const row = await db
-    .prepare('SELECT value FROM settings WHERE key = ?')
-    .bind(AI_KEY_SECRET_KEY)
-    .first<{ value: string }>();
-  return row ? decodeSecret(row.value) : null;
+  return readSecret(db, AI_KEY_SECRET_KEY);
 }
 
 export async function writeAiApiKey(db: D1Database, key: string): Promise<void> {
@@ -101,6 +123,20 @@ export async function writeAiApiKey(db: D1Database, key: string): Promise<void> 
 /** Removing the row is what makes `aiKeySet` false again. */
 export async function clearAiApiKey(db: D1Database): Promise<void> {
   await db.prepare('DELETE FROM settings WHERE key = ?').bind(AI_KEY_SECRET_KEY).run();
+}
+
+/** The plaintext Cloud API token, or null when none is stored. Never leaves the worker. */
+export async function readBriefingWhatsappToken(db: D1Database): Promise<string | null> {
+  return readSecret(db, BRIEFING_TOKEN_SECRET_KEY);
+}
+
+export async function writeBriefingWhatsappToken(db: D1Database, token: string): Promise<void> {
+  await writeSettings(db, { [BRIEFING_TOKEN_SECRET_KEY]: token });
+}
+
+/** Removing the row is what makes `briefingWhatsappTokenSet` false again. */
+export async function clearBriefingWhatsappToken(db: D1Database): Promise<void> {
+  await db.prepare('DELETE FROM settings WHERE key = ?').bind(BRIEFING_TOKEN_SECRET_KEY).run();
 }
 
 /** Upsert only the given keys — unrelated settings are never touched (spec §4.5). */
