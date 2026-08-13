@@ -61,6 +61,11 @@ interface AppStore {
   inboxEmails: InboxEmail[];
   activeModal: ModalKind;
   toasts: Toast[];
+  /** Build id the server last reported (version-skew detection, shared/version.ts);
+   * null = unknown (older server, or nothing fetched yet) — never guess a
+   * mismatch. Set from every /api/state response (load + refreshQuiet), so a
+   * rollback to this tab's own build honestly clears any banner. */
+  serverBuildId: string | null;
 
   load(): Promise<void>;
   toast(kind: Toast['kind'], message: string): void;
@@ -167,6 +172,7 @@ export const useStore = create<AppStore>((set, get) => ({
   inboxEmails: [],
   activeModal: null,
   toasts: [],
+  serverBuildId: null,
 
   async load() {
     set({ loadError: null });
@@ -184,6 +190,7 @@ export const useStore = create<AppStore>((set, get) => ({
         ruleSuggestions: s.ruleSuggestions ?? [],
         merchantQuestions: s.merchantQuestions ?? [],
         inboxEmails: s.inboxEmails ?? [],
+        serverBuildId: s.buildId ?? null,
       }));
     } catch (e) {
       set({ loadError: e instanceof Error ? e.message : 'Failed to load your data.' });
@@ -336,6 +343,7 @@ export const useStore = create<AppStore>((set, get) => ({
         ruleSuggestions: s.ruleSuggestions ?? [],
         merchantQuestions: s.merchantQuestions ?? [],
         inboxEmails: s.inboxEmails ?? [],
+        serverBuildId: s.buildId ?? null,
       }));
     } catch {
       /* keep current state */
