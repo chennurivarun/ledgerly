@@ -673,6 +673,12 @@ export default function Documents() {
                 isPdf &&
                 (!statement ||
                   STATEMENT_REEXTRACTABLE_STATUSES.includes(statement.status) ||
+                  // A fully-confirmed job stays re-runnable: a truncated read
+                  // whose rows were all imported still has missing months, and
+                  // re-running never re-proposes imported rows (their
+                  // fingerprints exclude them server-side). Live incident
+                  // 2026-08-13: confirmed+truncated left no action at all.
+                  statement.status === 'confirmed' ||
                   ((statement.status === 'suggested' || statement.status === 'partial') && proposedCount === 0));
               const statementBlockedByProvider =
                 showStatementAction && !providerCanReadPdfStatements(aiProvider);
