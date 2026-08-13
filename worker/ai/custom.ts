@@ -201,7 +201,8 @@ export async function runCustomChatDetailed(
     // the user typed into it) — dropped, like every other detail here.
     if (controller.signal.aborted) {
       throw new Error(
-        'Your custom endpoint did not answer within 90 seconds. Check that the server is up, then try again.',
+        `Your custom endpoint did not answer within ${Math.round(timeoutMs / 1000)} seconds. ` +
+          'Check that the server is up, then try again.',
       );
     }
     throw new Error('Could not reach your custom endpoint. Check the base URL and the connection.');

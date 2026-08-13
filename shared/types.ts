@@ -499,7 +499,9 @@ export interface StatementConfirmInput {
 // ---------------------------------------------------------------------------
 
 /** Pages per round — keeps every request short and free-plan safe. */
-export const CLIENT_STATEMENT_PAGES_PER_ROUND = 8;
+// 4, not 8 (2026-08-13 live incident): free hosted endpoints took >90s on an
+// 8-dense-page prompt and every round timed out. Smaller bites finish.
+export const CLIENT_STATEMENT_PAGES_PER_ROUND = 4;
 
 /** Total pages a browser read will send; anything past this is a loud partial. */
 export const CLIENT_STATEMENT_MAX_PAGES = 100;

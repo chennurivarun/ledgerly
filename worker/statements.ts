@@ -1223,7 +1223,11 @@ export async function clientStatementRound(
       { baseUrl: settings.customBaseUrl, apiKey, model },
       pages,
       settings.categories,
-      deps,
+      // Statement rounds get a patient budget: free hosted endpoints
+      // (2026-08-13 incident) took >90s on dense pages and every round timed
+      // out at the receipt-sized ceiling. The Worker just awaits I/O; the
+      // browser client owns retry pacing. Receipts keep the short fuse.
+      { timeoutMs: 240_000, ...deps },
     );
   } catch (err) {
     if (err instanceof ApiFail) throw err;

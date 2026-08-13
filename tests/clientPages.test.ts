@@ -50,21 +50,22 @@ describe('clipPageText', () => {
 });
 
 describe('chunkPages', () => {
-  it('23 pages → rounds of 8, 8, 7, in order', () => {
+  it('23 pages → rounds of 4,4,4,4,4,3, in order', () => {
     const pages = Array.from({ length: 23 }, (_, i) => i);
     const rounds = chunkPages(pages);
-    expect(rounds.map((r) => r.length)).toEqual([8, 8, 7]);
+    expect(rounds.map((r) => r.length)).toEqual([4, 4, 4, 4, 4, 3]);
     expect(rounds[0][0]).toBe(0);
-    expect(rounds[2][6]).toBe(22);
+    expect(rounds[5][2]).toBe(22);
   });
 
   it('an exact multiple has no ragged tail; a single page is one round', () => {
-    expect(chunkPages(Array.from({ length: 16 }, (_, i) => i)).map((r) => r.length)).toEqual([8, 8]);
+    expect(chunkPages(Array.from({ length: 16 }, (_, i) => i)).map((r) => r.length)).toEqual([4, 4, 4, 4]);
     expect(chunkPages([1]).map((r) => r.length)).toEqual([1]);
   });
 
   it('defaults to the shared per-round constant', () => {
-    expect(CLIENT_STATEMENT_PAGES_PER_ROUND).toBe(8);
+    // 4, not 8 — the 2026-08-13 free-endpoint timeout incident.
+    expect(CLIENT_STATEMENT_PAGES_PER_ROUND).toBe(4);
     expect(CLIENT_STATEMENT_MAX_PAGES).toBe(100);
   });
 });

@@ -559,7 +559,7 @@ describe('runCustomChat — error taxonomy (bodies dropped, key never quoted)', 
         init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
       })) as typeof fetch;
     await expect(runCustomChat(CFG, MESSAGES, { fetchImpl, timeoutMs: 5 })).rejects.toThrow(
-      /did not answer within 90 seconds/i,
+      /did not answer within \d+ seconds/i,
     );
   });
 

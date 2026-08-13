@@ -386,9 +386,9 @@ describe('validateRoundPages', () => {
     ['a missing pages array', {}, /send the pages/i],
     ['an empty round', { pages: [] }, /at least one page/i],
     [
-      'more than 8 pages',
-      { pages: Array.from({ length: 9 }, (_, i) => textPage(i)) },
-      /at most 8 pages per round/i,
+      'more than the per-round cap',
+      { pages: Array.from({ length: 5 }, (_, i) => textPage(i)) },
+      /at most 4 pages per round/i,
     ],
     ['a non-object page', { pages: ['p'] }, /Page 1: expected an object/],
     ['a fractional index', { pages: [{ index: 1.5, kind: 'text', content: 'x' }] }, /index/i],
@@ -1098,25 +1098,25 @@ describe('client-pages state vs the Sarvam resumable reader', () => {
 // ---------------------------------------------------------------------------
 
 describe('preflight for the browser flow', () => {
-  it('buildStatementPreflight: rounds of 8, and NEVER an invented cost', () => {
+  it('buildStatementPreflight: rounds of the per-round cap, and NEVER an invented cost', () => {
     for (const [pages, batches] of [
       [1, 1],
-      [8, 1],
-      [9, 2],
-      [16, 2],
-      [23, 3],
-      [100, 13],
+      [4, 1],
+      [5, 2],
+      [16, 4],
+      [23, 6],
+      [100, 25],
     ] as const) {
       expect(buildStatementPreflight(pages, 'custom', null).batches).toBe(batches);
     }
     // Even a saved Sarvam rate never prices someone else's endpoint.
     expect(buildStatementPreflight(23, 'custom', 0.05)).toEqual({
       pages: 23,
-      batches: 3,
+      batches: 6,
       provider: 'custom',
       estimatedCost: null,
     });
-    expect(CLIENT_STATEMENT_PAGES_PER_ROUND).toBe(8);
+    expect(CLIENT_STATEMENT_PAGES_PER_ROUND).toBe(4);
   });
 
   it('a stored pageCount answers without re-parsing the PDF (garbage bytes prove it)', async () => {
@@ -1133,7 +1133,7 @@ describe('preflight for the browser flow', () => {
     );
     expect(await statementPreflight(env, DOC)).toEqual({
       pages: 23,
-      batches: 3,
+      batches: 6,
       provider: 'custom',
       estimatedCost: null,
     });
