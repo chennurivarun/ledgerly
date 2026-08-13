@@ -5,12 +5,15 @@
 // server-side, the duplicate fingerprint applies per row, unreadable rows are
 // reported and skipped rather than guessed, and a run that could not read the
 // whole statement says so instead of quietly returning less.
+import { cleanBankDescriptor } from '../shared/descriptors';
 import { txFingerprint } from '../shared/fingerprint';
 import {
   MAX_FILE_BYTES,
   MAX_STATEMENT_ROWS,
+  NEEDS_REVIEW,
   type AiProvider,
   type BatchInsertResult,
+  type Rule,
   type Settings,
   type StatementExtraction,
   type StatementJobStatus,
@@ -38,6 +41,8 @@ import {
   type StatementRun,
 } from './ai';
 import { extractionInFlight, readDocumentRow } from './extractions';
+import { readEnabledRules } from './queries';
+import { applyRules } from './rules';
 import { readSarvamApiKey, readSettings } from './settingsStore';
 import {
   DEFAULT_ACCOUNT,
@@ -378,6 +383,63 @@ export function defaultStatementAccount(accounts: readonly string[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Proposal enrichment (sprint 13, pure — exercised directly by tests)
+// ---------------------------------------------------------------------------
+
+/**
+ * Proposals arrive organized, not raw: the merchant is the printed
+ * descriptor's cleaned form (a deterministic TRANSFORM — see
+ * shared/descriptors.ts), and a category the model left blank is filled from
+ * the user's OWN rules through the one matching engine, applyRules — never a
+ * fork of it (the sprint-5 anti-fork rule).
+ *
+ * Ordering contract: this runs on normalized rows BEFORE the fingerprint /
+ * duplicate pass in persistStatementRun, so the duplicate pre-flag and the
+ * eventual insert fingerprint agree on the cleaned merchant name.
+ *
+ * Field semantics:
+ * - merchant: value is cleaned; confidence is UNCHANGED — the read confidence
+ *   still describes the read, and the cleanup neither improves nor degrades
+ *   what the model saw.
+ * - category: a managed category the model grounded in the document is NEVER
+ *   overwritten (spec §8.1.6 — rules fill, they don't overrule). Only a null
+ *   or unmanaged value is offered to the rules, matched against the CLEANED
+ *   merchant. A rule that fires sets {value, confidence: 1}: a rule the user
+ *   wrote or accepted is deterministic user-authored knowledge, not model
+ *   output — certainty 1, so it never trips the review screen's
+ *   low-confidence markers. No rule → the field stays exactly as it was
+ *   (the Needs-review fallback stays honest).
+ */
+export function enrichStatementRows(
+  rows: StatementRowFields[],
+  rules: Rule[],
+  categories: readonly string[],
+): StatementRowFields[] {
+  const managed = new Set(categories.map((c) => c.trim().toLowerCase()));
+  return rows.map((row) => {
+    const merchant =
+      row.merchant.value === null
+        ? row.merchant
+        : { value: cleanBankDescriptor(row.merchant.value), confidence: row.merchant.confidence };
+
+    let category = row.category;
+    const isManaged =
+      category.value !== null && managed.has(category.value.trim().toLowerCase());
+    if (!isManaged) {
+      const ruled = applyRules(
+        { merchant: merchant.value ?? '', category: NEEDS_REVIEW, tags: [] },
+        rules,
+      );
+      if (ruled.category !== NEEDS_REVIEW) {
+        category = { value: ruled.category, confidence: 1 };
+      }
+    }
+
+    return { ...row, merchant, category };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Preflight (sprint 10) — what a run would involve, before anything is spent
 // ---------------------------------------------------------------------------
 
@@ -579,10 +641,11 @@ async function insertRows(db: D1Database, rows: RowRow[]): Promise<void> {
 /**
  * The one persistence flow every completed read goes through, whichever
  * provider produced the rows and however many requests it took: normalize,
- * hide rows the user already imported, pre-flag duplicates, replace the
- * untriaged proposals, save the job as suggested/partial. Extracted verbatim
- * from the original single-request path (sprint 12) so the resumable
- * finalize step reuses it rather than forking it.
+ * enrich (clean merchants + rule-filled categories, sprint 13), hide rows the
+ * user already imported, pre-flag duplicates, replace the untriaged
+ * proposals, save the job as suggested/partial. Extracted verbatim from the
+ * original single-request path (sprint 12) so the resumable finalize step
+ * reuses it rather than forking it.
  */
 async function persistStatementRun(
   env: Env,
@@ -593,7 +656,15 @@ async function persistStatementRun(
   model: string,
   now: string,
 ): Promise<StatementExtraction> {
-  const { rows: fields, capped } = normalizeStatementRows(run.rows, settings.categories);
+  const { rows: normalized, capped } = normalizeStatementRows(run.rows, settings.categories);
+  // Enrichment runs BEFORE anything fingerprints: the confirmed-row hiding,
+  // the duplicate pre-flags and the eventual insert all see the same cleaned
+  // merchant name.
+  const fields = enrichStatementRows(
+    normalized,
+    await readEnabledRules(env.DB),
+    settings.categories,
+  );
   const account = defaultStatementAccount(settings.accounts);
 
   // Rows the user already imported keep their place and are not offered
