@@ -440,6 +440,10 @@ describe('runCustomChat — request shape', () => {
     // Pinned: no structured-output field — server support varies and the
     // normalize pipeline distrusts the output either way.
     expect('response_format' in body).toBe(false);
+    // Pinned: explicit token headroom — hosted-endpoint defaults can be small
+    // enough to starve a statement round's rows JSON (live incident
+    // 2026-08-13 on NVIDIA Build).
+    expect(body.max_tokens).toBe(8192);
   });
 
   it('sends Bearer auth exactly when a key is present', async () => {
@@ -470,6 +474,35 @@ describe('runCustomChat — request shape', () => {
       ]),
     );
     expect(await runCustomChat(CFG, MESSAGES, { fetchImpl })).toBe('{"a":1}');
+  });
+
+  it('falls back to reasoning_content when content is empty (vLLM reasoning parsers)', async () => {
+    // Live incident 2026-08-13: a reasoning model on NVIDIA Build returned
+    // its whole answer in reasoning_content with content empty — every
+    // statement round yielded zero rows.
+    const { fetchImpl } = scriptedFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '', reasoning_content: 'thinking… {"rows":[]}' } }],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    expect(await runCustomChat(CFG, MESSAGES, { fetchImpl })).toBe('thinking… {"rows":[]}');
+  });
+
+  it('prefers real content over reasoning_content when both are present', async () => {
+    const { fetchImpl } = scriptedFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'the answer', reasoning_content: 'the thinking' } }],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    expect(await runCustomChat(CFG, MESSAGES, { fetchImpl })).toBe('the answer');
   });
 });
 

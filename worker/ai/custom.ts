@@ -114,14 +114,23 @@ function readCompletionText(body: unknown): string | null {
   const first: unknown = body.choices[0];
   if (!isRecord(first) || !isRecord(first.message)) return null;
   const content = first.message.content;
-  if (typeof content === 'string') return content;
+  if (typeof content === 'string' && content.trim() !== '') return content;
   if (Array.isArray(content)) {
     const texts = content
       .filter((part): part is { type: 'text'; text: string } =>
         isRecord(part) && part.type === 'text' && typeof part.text === 'string')
       .map((part) => part.text);
-    return texts.length > 0 ? texts.join('') : null;
+    if (texts.length > 0) return texts.join('');
   }
+  // Reasoning models served behind vLLM-style reasoning parsers split their
+  // output: thinking goes to `reasoning_content`, the answer to `content` —
+  // and a misconfigured or mismatched parser can leave content EMPTY with
+  // everything in reasoning_content (live incident 2026-08-13: muse-glimmer
+  // on NVIDIA Build produced zero readable rows this way). When content is
+  // empty, fall back to reasoning_content as suspect text — the parse/salvage
+  // layer downstream treats every model answer as suspect anyway.
+  const reasoning = first.message.reasoning_content;
+  if (typeof reasoning === 'string' && reasoning.trim() !== '') return reasoning;
   return null;
 }
 
@@ -162,7 +171,12 @@ export async function runCustomChat(
     res = await fetchImpl(`${cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ model: cfg.model, temperature: 0, messages }),
+      // max_tokens is explicit because hosted-endpoint DEFAULTS can be small
+      // (NIM previews commonly cap near 1-2k): a statement round's rows JSON
+      // — after a reasoning model's thinking spend — needs real headroom, and
+      // a server that allows less simply caps it (the salvage layer already
+      // handles cut answers loudly). 8192 covers ~300 rows comfortably.
+      body: JSON.stringify({ model: cfg.model, temperature: 0, max_tokens: 8192, messages }),
       signal: controller.signal,
     });
   } catch {
