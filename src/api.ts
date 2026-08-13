@@ -7,6 +7,7 @@ import {
   type BatchInsertResult,
   type DriveSyncStatus,
   type ExtractionResult,
+  type MerchantAnswerInput,
   type PatchTxInput,
   type PreferencesResult,
   type PreferencesUpdate,
@@ -150,6 +151,23 @@ export const api = {
   /** Suppress a suggestion; it will not be offered again for this pair. */
   dismissRuleSuggestion: (input: RuleSuggestionActionInput) =>
     request<{ ok: true }>('/api/rule-suggestions/dismiss', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify(input),
+    }),
+
+  /** Answer a "Getting to know you" question: stores the merchant profile,
+   * creates the rule, and optionally recategorizes existing 'Needs review' rows. */
+  answerMerchantQuestion: (input: MerchantAnswerInput) =>
+    request<{ rules: Rule[]; recategorized: number }>('/api/merchant-questions/answer', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      body: JSON.stringify(input),
+    }),
+
+  /** Suppress a merchant question; it will not be asked again. */
+  dismissMerchantQuestion: (input: { merchant: string }) =>
+    request<{ ok: true }>('/api/merchant-questions/dismiss', {
       method: 'POST',
       headers: JSON_HEADERS,
       body: JSON.stringify(input),
