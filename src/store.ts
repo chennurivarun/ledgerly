@@ -86,6 +86,10 @@ interface AppStore {
   statementPreflight(id: string): Promise<StatementPreflight>;
   /** Read a PDF statement into proposed rows; inserts nothing. */
   extractStatement(id: string): Promise<StatementExtraction>;
+  /** Store a statement result produced outside the plain extract call — the
+   * browser-pages flow (sprint 16) finalizes server-side and hands the
+   * settled job here for the same upsert extractStatement performs. */
+  applyStatement(result: StatementExtraction): void;
   /** Import the user-selected (possibly edited) rows. */
   confirmStatementRows(id: string, input: StatementConfirmInput): Promise<BatchInsertResult>;
   dismissStatement(id: string): Promise<void>;
@@ -299,6 +303,15 @@ export const useStore = create<AppStore>((set, get) => ({
       statements: [...st.statements.filter((x) => x.documentId !== id), result],
     }));
     return result;
+  },
+
+  applyStatement(result) {
+    set((st) => ({
+      statements: [
+        ...st.statements.filter((x) => x.documentId !== result.documentId),
+        result,
+      ],
+    }));
   },
 
   async confirmStatementRows(id, input) {

@@ -23,6 +23,12 @@ import {
   receiptExtractOffered,
 } from '../components/ai/extractionHelpers';
 import {
+  ClientReadCancelled,
+  createCancelToken,
+  runClientStatementRead,
+  type CancelToken,
+} from '../components/ai/clientPages';
+import {
   customMissingConfig,
   missingKeyProvider,
   pdfStatementsBlockedCopy,
@@ -152,6 +158,7 @@ export default function Documents() {
   const extractDocument = useStore((s) => s.extractDocument);
   const statementPreflight = useStore((s) => s.statementPreflight);
   const extractStatement = useStore((s) => s.extractStatement);
+  const applyStatement = useStore((s) => s.applyStatement);
   const dismissInboxEmail = useStore((s) => s.dismissInboxEmail);
   const refreshQuiet = useStore((s) => s.refreshQuiet);
   const toast = useStore((s) => s.toast);
@@ -193,6 +200,17 @@ export default function Documents() {
   const [reviewing, setReviewing] = useState<{ id: string; kind: 'extract' | 'statement' | 'inbox' } | null>(null);
   // One in-flight inbox row action at a time (the id being dismissed).
   const [inboxDismissing, setInboxDismissing] = useState<string | null>(null);
+  // A browser-pages statement read in flight (custom provider, sprint 16):
+  // per-document busy state with client-driven progress copy. Deliberately
+  // NOT the `running` slot — a browser read can take minutes on free-tier
+  // rate limits, and locking every other row's actions for that long would
+  // freeze the page around one document. One read at a time is still
+  // enforced (single slot + statement buttons gated below); everything that
+  // isn't a statement read stays live.
+  const [clientRead, setClientRead] = useState<{ id: string; label: string } | null>(null);
+  // The read's cancellation token — flipped by the vanish guard and by
+  // unmount, at which point the flow itself POSTs the best-effort abort.
+  const clientReadToken = useRef<CancelToken | null>(null);
 
   const aiOn = aiProvider !== 'off';
   // A BYOK provider (Anthropic or Sarvam) without its stored key can't
@@ -266,6 +284,47 @@ export default function Documents() {
       setStatementError({ id: doc.id, message });
     } finally {
       setRunning(null);
+    }
+  }
+
+  // The custom provider's statement path (sprint 16): the browser extracts
+  // the pages and drives begin → rounds → finalize; the worker owns the
+  // model calls and persistence. On the finalized result the EXISTING
+  // machinery takes over unchanged — same store upsert, same auto-open
+  // guard, same review modal. Failures land in the same per-row transient
+  // slot as every other statement error.
+  async function handleClientRead(doc: DocumentMeta) {
+    if (clientRead) return; // one browser read at a time (buttons also gate)
+    setStatementError(null);
+    const token = createCancelToken();
+    clientReadToken.current = token;
+    setClientRead({ id: doc.id, label: 'Preparing…' });
+    try {
+      const result = await runClientStatementRead(
+        doc.id,
+        (label) => setClientRead({ id: doc.id, label }),
+        token,
+      );
+      applyStatement(result);
+      if (result.status === 'suggested' || result.status === 'partial') {
+        // Same never-steal-focus rule as every other auto-open.
+        setReviewing((current) => (current === null ? { id: doc.id, kind: 'statement' } : current));
+      }
+      // 'failed' is surfaced persistently via the statement row's own error
+      // text (the result just applied) — no toast on top of it.
+    } catch (e) {
+      if (!(e instanceof ClientReadCancelled)) {
+        setStatementError({
+          id: doc.id,
+          message: e instanceof Error ? e.message : 'Could not read that statement.',
+        });
+        // The abort the flow sent settles the job to 'failed' server-side —
+        // pull that state so the chip agrees with the error text.
+        void refreshQuiet();
+      }
+    } finally {
+      clientReadToken.current = null;
+      setClientRead(null);
     }
   }
 
@@ -396,6 +455,28 @@ export default function Documents() {
       toast('error', 'That statement is no longer available.');
     }
   }, [preflight, documents, toast]);
+
+  // Vanish guard for a browser-pages read: if its document disappears
+  // mid-read (deleted, or dropped by a background refresh), flip the cancel
+  // token — the flow notices at its next step, sends the best-effort abort,
+  // and unwinds silently — and say why here.
+  useEffect(() => {
+    if (!clientRead) return;
+    if (!documents.some((d) => d.id === clientRead.id)) {
+      if (clientReadToken.current) clientReadToken.current.cancelled = true;
+      setClientRead(null);
+      toast('error', 'That statement is no longer available.');
+    }
+  }, [clientRead, documents, toast]);
+
+  // Leaving the page cancels an in-flight browser read the same way — the
+  // flow's own cancellation path posts the abort so the claim never lingers.
+  useEffect(
+    () => () => {
+      if (clientReadToken.current) clientReadToken.current.cancelled = true;
+    },
+    [],
+  );
 
   async function handleInboxDismiss(item: InboxEmail) {
     setInboxDismissing(item.id);
@@ -611,9 +692,9 @@ export default function Documents() {
         // Shown once for the whole vault (same convention as the banners
         // above), not per row — every PDF's "Read as statement" button is
         // disabled for the same reason, so repeating it on each row would
-        // just be noise. With aiReady true this fires for Workers AI or a
-        // custom endpoint; the helper picks the copy that names the actual
-        // provider, so it can never blame the wrong one.
+        // just be noise. With aiReady true only Workers AI is still blocked
+        // (custom reads statements via the browser-pages flow since S16);
+        // the helper owns the copy so this can never blame the wrong one.
         <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">
           <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
           <span>{pdfStatementsBlockedCopy(aiProvider)}</span>
@@ -743,7 +824,17 @@ export default function Documents() {
                   </div>
                   <StatusBadge label={STATUS_LABEL[doc.status]} tone={STATUS_TONE[doc.status]} />
                   {extraction && <StatusBadge label={EXTRACTION_LABEL[extraction.status]} tone={EXTRACTION_TONE[extraction.status]} />}
-                  {statement && <StatusBadge label={statementLabel(statement)} tone={STATEMENT_TONE[statement.status]} />}
+                  {clientRead?.id === doc.id ? (
+                    // A browser-pages read reports which pages it is on —
+                    // richer than the server chip's generic pending copy, so
+                    // it stands in for it while the read runs (one progress
+                    // surface, not two disagreeing ones).
+                    <StatusBadge label={clientRead.label} tone="info" />
+                  ) : (
+                    statement && (
+                      <StatusBadge label={statementLabel(statement)} tone={STATEMENT_TONE[statement.status]} />
+                    )
+                  )}
                   {showReview && (
                     // Disabled parity with Extract: opening a review while
                     // another document's extraction is in flight is exactly
@@ -788,9 +879,17 @@ export default function Documents() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      loading={running?.id === doc.id && running.kind === 'statement'}
+                      loading={
+                        (running?.id === doc.id && running.kind === 'statement') ||
+                        clientRead?.id === doc.id
+                      }
+                      // A browser read in flight gates every statement
+                      // button (one read at a time; the busy doc's shows the
+                      // spinner) — but ONLY statement buttons: the rest of
+                      // the page stays live, unlike the `running` slot.
                       disabled={
                         statementBlockedByProvider ||
+                        clientRead !== null ||
                         (running !== null && !(running.id === doc.id && running.kind === 'statement'))
                       }
                       title={statementBlockedByProvider ? 'PDF statements need the Anthropic or Sarvam provider' : undefined}
@@ -850,7 +949,11 @@ export default function Documents() {
               onConfirm={() => {
                 const doc = preflight.doc;
                 setPreflight(null);
-                void handleReadStatement(doc);
+                // The custom provider reads through the browser-pages flow
+                // (sprint 16); every other capable provider keeps the
+                // original server-side read untouched.
+                if (aiProvider === 'custom') void handleClientRead(doc);
+                else void handleReadStatement(doc);
               }}
               onCancel={() => setPreflight(null)}
             />

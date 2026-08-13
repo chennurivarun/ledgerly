@@ -34,7 +34,9 @@ export interface CustomDeps {
  */
 const REQUEST_TIMEOUT_MS = 90000;
 
-const UNREADABLE_RESPONSE = 'Your custom endpoint returned a response that could not be read.';
+/** Shared with the statement-pages round runner so the copy cannot drift. */
+export const UNREADABLE_RESPONSE =
+  'Your custom endpoint returned a response that could not be read.';
 
 // ---------------------------------------------------------------------------
 // Error taxonomy — the anthropic.ts contract: something a user can act on,

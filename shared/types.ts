@@ -487,6 +487,61 @@ export interface StatementConfirmInput {
   rows: (TxInput & { rowId: string })[];
 }
 
+// ---------------------------------------------------------------------------
+// Browser statement reads over the custom endpoint (sprint 16). The user's
+// own browser extracts each PDF page (text layer first, rendered image as the
+// fallback) and posts pages in small rounds; the worker owns the model calls
+// and every persistence step. Rows a browser submits are SUGGESTIONS that ride
+// the same never-guess normalization and review table as every provider —
+// the manual-entry trust model. The custom API key never leaves the worker.
+// ---------------------------------------------------------------------------
+
+/** Pages per round — keeps every request short and free-plan safe. */
+export const CLIENT_STATEMENT_PAGES_PER_ROUND = 8;
+
+/** Total pages a browser read will send; anything past this is a loud partial. */
+export const CLIENT_STATEMENT_MAX_PAGES = 100;
+
+/** Server cap on one text page's extracted characters. */
+export const STATEMENT_PAGE_TEXT_MAX_CHARS = 20000;
+
+/** Server cap on one image page's data-URI length (bytes of the string). */
+export const STATEMENT_PAGE_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+
+/** One browser-extracted page (POST .../statement/pages/round). */
+export interface StatementPageInput {
+  /** 0-based page position in the PDF. */
+  index: number;
+  /** 'text' = the page's own text layer read clean; 'image' = a rendered
+   * JPEG/PNG data URI for scanned or text-poor pages. */
+  kind: 'text' | 'image';
+  /** kind 'text': extracted text (≤ STATEMENT_PAGE_TEXT_MAX_CHARS);
+   * kind 'image': a data: URI (≤ STATEMENT_PAGE_IMAGE_MAX_BYTES). */
+  content: string;
+}
+
+/** POST .../statement/pages/round body. */
+export interface StatementPagesRoundInput {
+  pages: StatementPageInput[];
+}
+
+/** POST .../statement/pages/round response: raw rows, nothing persisted. */
+export interface StatementPagesRoundResult {
+  /** Unvalidated row objects exactly as the model returned them — finalize
+   * owns normalization and persistence. */
+  rows: unknown[];
+  /** True when a round's answer had to be salvaged mid-JSON — rows may be
+   * missing from it, and the client must carry that loudly into finalize. */
+  truncated: boolean;
+}
+
+/** POST .../statement/pages/finalize body. */
+export interface StatementPagesFinalizeInput {
+  rows: unknown[];
+  /** True when any round failed after retries or pages were skipped. */
+  truncated: boolean;
+}
+
 /** POST /api/transactions — single or batch */
 export interface TxInput {
   date: string;

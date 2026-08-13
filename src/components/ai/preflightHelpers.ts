@@ -8,13 +8,15 @@ import { fmtCurrency } from '../../../shared/format';
 import type { AiProvider, StatementPreflight } from '../../../shared/types';
 
 /**
- * Providers that can read PDF statements — mirrors the server's selectProvider
- * rules (Workers AI cannot ingest PDFs; Anthropic and Sarvam both can).
- * Single source for the Documents page's disabled state, its banner, and the
- * button tooltip, so the three can never disagree.
+ * Providers that can read PDF statements — mirrors the server's
+ * selectStatementProvider rules (Workers AI cannot ingest PDFs; Anthropic and
+ * Sarvam read the PDF themselves; the custom endpoint reads statements
+ * through the sprint-16 browser-pages flow). Single source for the Documents
+ * page's disabled state, its banner, and the button tooltip, so the three can
+ * never disagree.
  */
 export function providerCanReadPdfStatements(provider: AiProvider): boolean {
-  return provider === 'anthropic' || provider === 'sarvam';
+  return provider === 'anthropic' || provider === 'sarvam' || provider === 'custom';
 }
 
 /**
@@ -59,18 +61,13 @@ export function customMissingConfig(
 
 /**
  * Why the active, otherwise-ready provider cannot read PDF statements — the
- * page-level banner copy, or null for the providers that can. Single source
- * for the Documents banner so it can never claim "Workers AI can't read
- * them" while a custom endpoint is what's actually selected. The custom copy
- * matches the server's refusal (CUSTOM_NO_PDF, worker/ai/providers.ts)
- * verbatim so the banner and the 400 say the same thing.
+ * page-level banner copy, or null for the providers that can. Since sprint 16
+ * the custom endpoint CAN (the browser-pages flow), so Workers AI is the only
+ * ready-but-blocked provider left.
  */
 export function pdfStatementsBlockedCopy(provider: AiProvider): string | null {
   if (provider === 'workers-ai') {
     return "PDF statements need the Anthropic or Sarvam provider — Workers AI can't read them.";
-  }
-  if (provider === 'custom') {
-    return "Your custom endpoint receives page images; PDFs aren't supported on it yet — statements and PDF receipts need Sarvam or Anthropic for now.";
   }
   return null;
 }
@@ -94,6 +91,11 @@ export function preflightSummary(p: Pick<StatementPreflight, 'pages' | 'batches'
  * - Anthropic: per-token billing — static honest copy, never a fake figure,
  *   and never the per-page estimate line even if a cost value sneaks through
  *   (per-page arithmetic doesn't describe per-token billing).
+ * - Custom: the read runs in the browser against the user's own endpoint —
+ *   Ledgerly adds no charge, and whatever the endpoint bills (usually
+ *   nothing, on free tiers) is between the user and their endpoint. Never
+ *   the per-page line even if a number sneaks through, same rule as
+ *   Anthropic.
  */
 export function preflightCostLine(
   p: Pick<StatementPreflight, 'provider' | 'estimatedCost'>,
@@ -106,6 +108,9 @@ export function preflightCostLine(
   }
   if (p.provider === 'anthropic') {
     return 'Anthropic bills per token — typically a few cents per statement.';
+  }
+  if (p.provider === 'custom') {
+    return "Read in your browser via your custom endpoint — Ledgerly adds no cost; your endpoint's own limits and pricing apply.";
   }
   return null;
 }
