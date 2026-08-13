@@ -731,6 +731,10 @@ describe('clientStatementRound', () => {
       completionResponse(JSON.stringify({ rows: [envelopeRow('raw-as-returned')] })),
     );
     const { env, tables } = roundEnv();
+    // Backdate the seeded claim: the re-stamp writes a fresh now(), and on a
+    // fast machine seed + round can land in the SAME millisecond, making a
+    // plain not-equal assertion flaky (caught once at merge time).
+    tables.statement_extractions[0].updatedAt = '2026-01-01T00:00:00.000Z';
     const before = tables.statement_extractions[0].updatedAt;
     const out = await clientStatementRound(env, DOC, { pages: [textPage(0)] }, { fetchImpl });
 
