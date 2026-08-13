@@ -757,23 +757,13 @@ async function runStatementTick(
   const documentId = current.documentId;
 
   if (state.jobs.some((j) => j.status === 'submitted')) {
-    // Overall deadline, anchored on submittedAt (see STATEMENT_RESUME_DEADLINE_MS
-    // for why not createdAt). Only an unfinished run can expire: a run whose
-    // batches are all terminal finalizes below no matter how late the tick is —
-    // the pages are already read and paid for.
-    const submitted = Date.parse(state.submittedAt);
-    const anchor = Number.isNaN(submitted) ? Date.parse(current.createdAt) : submitted;
-    if (Date.parse(now) - anchor > STATEMENT_RESUME_DEADLINE_MS) {
-      await writeProviderState(env.DB, documentId, null, now);
-      return await saveFailedJob(
-        env,
-        documentId,
-        current.provider,
-        current.model,
-        STATEMENT_DEADLINE_MESSAGE,
-        now,
-      );
-    }
+    // The 20-minute deadline is judged AFTER the harvest attempt below, and
+    // only when a tick makes zero forward progress: a tick that arrives late
+    // (interrupted client, closed tab) must first rescue batches that Sarvam
+    // already finished — those pages are read and paid for. Live incident
+    // 2026-08-13: deadline-before-harvest discarded an hour-old run whose
+    // three batches were almost certainly complete.
+    let progressed = false;
 
     // A key removed mid-run makes this tick a no-op rather than a failure:
     // the jobs still exist at Sarvam and were paid for, so the run stays
@@ -790,12 +780,14 @@ async function runStatementTick(
           if (!isSarvamTerminal(status)) continue;
           if (status === 'failed' || status === 'rejected') {
             job.status = 'failed';
+            progressed = true;
             continue;
           }
           // completed / partially_completed both have readable results.
           if (harvests >= TICK_MAX_RESULT_FETCHES) continue; // next tick's work
           job.rows = await fetchSarvamJobRows(apiKey, job.jobId, deps);
           job.status = status === 'completed' ? 'done' : 'failed';
+          progressed = true;
           harvests++;
         }
       } catch {
@@ -807,6 +799,23 @@ async function runStatementTick(
 
     await writeProviderState(env.DB, documentId, state, now);
     if (state.jobs.some((j) => j.status === 'submitted')) {
+      // Anchored on submittedAt (createdAt survives re-runs — an S4 pin —
+      // so anchoring there would make re-runs of old statements born
+      // expired). A tick that advanced anything skips the verdict: progress
+      // means Sarvam is still delivering, however late we are.
+      const submitted = Date.parse(state.submittedAt);
+      const anchor = Number.isNaN(submitted) ? Date.parse(current.createdAt) : submitted;
+      if (!progressed && Date.parse(now) - anchor > STATEMENT_RESUME_DEADLINE_MS) {
+        await writeProviderState(env.DB, documentId, null, now);
+        return await saveFailedJob(
+          env,
+          documentId,
+          current.provider,
+          current.model,
+          STATEMENT_DEADLINE_MESSAGE,
+          now,
+        );
+      }
       return await readJob(env.DB, documentId);
     }
   }

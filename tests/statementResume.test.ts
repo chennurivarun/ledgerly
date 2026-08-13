@@ -693,15 +693,35 @@ describe('the overall deadline', () => {
       settings: sarvamSettings(),
       statement_extractions: [pendingJob(st)],
     });
-    const api = sarvamApi({});
+    // job-b is genuinely still running at Sarvam — the one case that expires.
+    const api = sarvamApi({ statuses: { 'job-b': ['pending'] } });
     const done = await runStatementExtraction(env, DOC, { fetchImpl: api.fetchImpl });
     expect(done.status).toBe('failed');
     expect(done.error).toBe(STATEMENT_DEADLINE_MESSAGE);
     expect(done.progress).toBeNull();
     expect(tables.statement_extractions[0].providerState).toBeNull();
-    // Expired means expired: no further provider calls were spent on it.
-    expect(api.calls).toHaveLength(0);
+    // The verdict comes AFTER one last rescue attempt (2026-08-13 incident:
+    // deadline-before-harvest discarded paid, finished batches): exactly one
+    // status poll, no result fetches, and only then the expiry.
+    expect(api.calls).toHaveLength(1);
+    expect(api.calls[0].url).toContain('/job-b/status');
     expect(STATEMENT_RESUME_DEADLINE_MS).toBe(20 * 60 * 1000);
+  });
+
+  it('a late tick that finds batches finished RESCUES them instead of expiring the run', async () => {
+    const st = state([jobState('done', 'job-a', [rawRow('early')]), jobState('submitted', 'job-b')], {
+      submittedAt: minutesAgo(60),
+    });
+    const { env } = makeEnv(await pdfWithPages(11), {
+      settings: sarvamSettings(),
+      statement_extractions: [pendingJob(st)],
+    });
+    const api = sarvamApi({ statuses: { 'job-b': ['completed'] }, results: { 'job-b': { rows: [rawRow('late')] } } });
+    const done = await runStatementExtraction(env, DOC, { fetchImpl: api.fetchImpl });
+    // Progress was made this tick, so the hour-old age is irrelevant: the
+    // pages were read and paid for, and the run finalizes with all rows.
+    expect(done.status).toBe('suggested');
+    expect(done.rows.map((r) => r.merchant.value)).toEqual(['early', 'late']);
   });
 
   it('a run whose batches are ALL terminal finalizes even past the deadline — the pages were paid for', async () => {
