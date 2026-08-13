@@ -77,14 +77,40 @@ export function selectProvider(settings: Settings): ProviderChoice {
     }
     return { provider: 'sarvam', model: override || SARVAM_DEFAULT_MODEL };
   }
+  if (settings.aiProvider === 'custom') {
+    // The base URL IS the provider; without it there is nothing to call. The
+    // key is deliberately NOT checked — keyless servers (local Ollama) are a
+    // fully valid configuration, and a server that does want a key answers
+    // 401 with its own readable error copy (worker/ai/custom.ts).
+    if (!settings.customBaseUrl) {
+      throw new ApiFail(400, 'Set the endpoint base URL in Settings → AI to use the custom provider.');
+    }
+    // No default model exists or could honestly exist — the endpoint could be
+    // serving anything. The user names the model, or the run refuses.
+    if (!override) {
+      throw new ApiFail(400, 'Set the model id in Settings → AI.');
+    }
+    return { provider: 'custom', model: override };
+  }
   throw new ApiFail(400, 'Enable an AI provider in Settings to extract from documents.');
 }
+
+/**
+ * A custom OpenAI-compatible endpoint receives page IMAGES only (sprint 15):
+ * image_url content parts are the one vision input the OpenAI chat shape
+ * carries portably, while PDF ingestion is a per-vendor extension no two
+ * servers agree on. S16 (browser-rendered page images) lifts this by turning
+ * PDFs into images client-side; until then the refusal below is honest about
+ * where PDFs must go.
+ */
+export const CUSTOM_NO_PDF =
+  "Your custom endpoint receives page images; PDFs aren't supported on it yet — statements and PDF receipts need Sarvam or Anthropic for now.";
 
 /**
  * Anthropic reads PDFs natively; Sarvam Doc AI reads PDFs plus its documented
  * image formats; the Workers AI vision models document image input only, so a
  * PDF there is refused instead of being sent as bytes the model would
- * hallucinate over.
+ * hallucinate over. A custom endpoint is images-only too (see CUSTOM_NO_PDF).
  */
 export function supportsMime(provider: ProviderChoice['provider'], mimeType: string): boolean {
   const mime = canonicalMime(mimeType);
@@ -110,6 +136,9 @@ export function assertMimeSupported(
       'Sarvam reads PDFs and JPEG or PNG images. Upload one of those, or switch the provider in Settings.',
     );
   }
+  if (provider === 'custom') {
+    throw new ApiFail(400, CUSTOM_NO_PDF);
+  }
   throw new ApiFail(400, 'This file type cannot be read. Upload a PDF or an image of the receipt.');
 }
 
@@ -130,6 +159,11 @@ export const WORKERS_AI_NO_PDF =
  */
 export function selectStatementProvider(settings: Settings): ProviderChoice {
   if (settings.aiProvider === 'workers-ai') throw new ApiFail(400, WORKERS_AI_NO_PDF);
+  // Custom is refused BEFORE the config gates: "set the base URL" would send
+  // the user configuring an endpoint that still couldn't read the statement.
+  // The honest answer is that statements need a PDF-capable provider — S16
+  // (browser-rendered page images) is what lifts this.
+  if (settings.aiProvider === 'custom') throw new ApiFail(400, CUSTOM_NO_PDF);
   // 'off' and a missing key are the same configuration problems as receipt
   // extraction, and get the same messages.
   const choice = selectProvider(settings);

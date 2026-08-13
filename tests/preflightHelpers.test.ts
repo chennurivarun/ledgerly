@@ -19,6 +19,8 @@ describe('providerCanReadPdfStatements', () => {
     'workers-ai': false,
     anthropic: true,
     sarvam: true,
+    // Images-only until S16 renders statement pages to images client-side.
+    custom: false,
   };
 
   for (const [provider, capable] of Object.entries(expected) as [AiProvider, boolean][]) {
