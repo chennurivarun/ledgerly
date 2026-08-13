@@ -21,11 +21,13 @@ import { readRules, readTags } from './queries';
 import {
   clearAiApiKey,
   clearBriefingWhatsappToken,
+  clearCustomApiKey,
   clearSarvamApiKey,
   readSettings,
   redactAiSecret,
   writeAiApiKey,
   writeBriefingWhatsappToken,
+  writeCustomApiKey,
   writeSarvamApiKey,
   writeSettings,
 } from './settingsStore';
@@ -33,7 +35,7 @@ import { ApiFail, isIsoDate, isRecord, normalizeNames, uniqueStrings } from './u
 
 const PERIODS = new Set<string>(PERIOD_OPTIONS.map((p) => p.value));
 const CADENCES = new Set<string>(['weekly', 'biweekly', 'monthly', 'quarterly', 'annual']);
-const AI_PROVIDERS = new Set<string>(['off', 'workers-ai', 'anthropic', 'sarvam']);
+const AI_PROVIDERS = new Set<string>(['off', 'workers-ai', 'anthropic', 'sarvam', 'custom']);
 const BRIEFING_CADENCES = new Set<string>(['daily', 'weekly']);
 
 /**
@@ -93,6 +95,67 @@ export function normalizeSarvamPrice(raw: unknown): number | null {
   // Not rounded to cents: per-page rates are legitimately sub-cent (₹0.015);
   // the preflight rounds the final pages × price estimate instead.
   return n;
+}
+
+/**
+ * Hostnames a plain-http custom endpoint is allowed on. The pairing is for
+ * LOCAL DEV ONLY (a keyless Ollama at http://localhost:11434/v1 next to
+ * `npm run dev`): a DEPLOYED worker runs on Cloudflare's edge and cannot
+ * reach the user's localhost at all, so this loophole never sends anything
+ * over plain http across a real network. Everything remote must be https.
+ */
+const HTTP_OK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * The custom endpoint's base URL — the one piece of configuration that IS the
+ * provider (sprint 15). '' clears it. Anything else must be a URL the worker
+ * could actually call: https (or http on localhost, see above), no embedded
+ * credentials (keys travel in the Authorization header, never in the URL —
+ * a URL is quoted in too many places to hold a secret), no query or fragment
+ * (the client appends `/chat/completions`; a query string would end up in the
+ * middle of the path). Stored normalized with trailing slashes stripped so
+ * the client can always append its path with a single '/'.
+ * Exported pure so the validation decisions are testable without a DB.
+ */
+export function normalizeCustomBaseUrl(raw: unknown): string {
+  const value = typeof raw === 'string' ? raw.trim() : null;
+  if (value === null) {
+    throw new ApiFail(
+      400,
+      'customBaseUrl must be a URL like https://integrate.api.nvidia.com/v1, or empty to clear it.',
+    );
+  }
+  if (value === '') return '';
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ApiFail(
+      400,
+      'customBaseUrl must be a full URL like https://integrate.api.nvidia.com/v1.',
+    );
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new ApiFail(400, 'customBaseUrl must start with https:// (or http:// for localhost).');
+  }
+  if (url.protocol === 'http:' && !HTTP_OK_HOSTNAMES.has(url.hostname)) {
+    throw new ApiFail(
+      400,
+      'customBaseUrl must use https — plain http is allowed only for localhost (local dev).',
+    );
+  }
+  if (url.username || url.password) {
+    throw new ApiFail(
+      400,
+      'customBaseUrl must not embed credentials — save the API key in its own field instead.',
+    );
+  }
+  if (url.search || url.hash) {
+    throw new ApiFail(400, 'customBaseUrl must not have a query string or fragment.');
+  }
+  const path = url.pathname.replace(/\/+$/, '');
+  return `${url.protocol}//${url.host}${path}`;
 }
 
 /**
@@ -298,7 +361,7 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
   if ('aiProvider' in body) {
     const provider = typeof body.aiProvider === 'string' ? body.aiProvider : '';
     if (!AI_PROVIDERS.has(provider)) {
-      throw new ApiFail(400, 'aiProvider must be off, workers-ai, anthropic or sarvam.');
+      throw new ApiFail(400, 'aiProvider must be off, workers-ai, anthropic, sarvam or custom.');
     }
     patch.aiProvider = provider as AiProvider;
   }
@@ -334,6 +397,24 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
   }
   if ('sarvamPricePerPage' in body) {
     patch.sarvamPricePerPage = normalizeSarvamPrice(body.sarvamPricePerPage);
+  }
+
+  // The custom endpoint (sprint 15). The base URL is a plain setting, but
+  // never stored raw — normalizeCustomBaseUrl decides what a callable URL is.
+  // The key mirrors aiApiKey exactly (write-only, own row, never echoed,
+  // never quoted in an error message), with one semantic difference read at
+  // call time, not here: a stored key is OPTIONAL for this provider.
+  if ('customBaseUrl' in body) {
+    patch.customBaseUrl = normalizeCustomBaseUrl(body.customBaseUrl);
+  }
+  let customKeyAction: KeyAction | null = null;
+  if ('customApiKey' in body) {
+    if (body.customApiKey === null) customKeyAction = { type: 'clear' };
+    else if (typeof body.customApiKey === 'string' && body.customApiKey.trim()) {
+      customKeyAction = { type: 'set', value: body.customApiKey.trim() };
+    } else {
+      throw new ApiFail(400, 'customApiKey must be a non-empty key, or null to remove the stored key.');
+    }
   }
 
   // Proactive briefings (sprint 7). `briefingWhatsappTokenSet` is derived in
@@ -402,6 +483,8 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
   else if (keyAction?.type === 'clear') await clearAiApiKey(db);
   if (sarvamKeyAction?.type === 'set') await writeSarvamApiKey(db, sarvamKeyAction.value);
   else if (sarvamKeyAction?.type === 'clear') await clearSarvamApiKey(db);
+  if (customKeyAction?.type === 'set') await writeCustomApiKey(db, customKeyAction.value);
+  else if (customKeyAction?.type === 'clear') await clearCustomApiKey(db);
   if (briefingTokenAction?.type === 'set') {
     await writeBriefingWhatsappToken(db, briefingTokenAction.value);
   } else if (briefingTokenAction?.type === 'clear') {

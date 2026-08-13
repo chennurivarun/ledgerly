@@ -10,6 +10,7 @@
 // the ordinary persistence flow once every batch is terminal.
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
+import { txFingerprint } from '../shared/fingerprint';
 import {
   parseProviderState,
   runStatementExtraction,
@@ -125,6 +126,7 @@ interface Tables {
   statement_extractions: JobRecord[];
   statement_rows: Record<string, unknown>[];
   transactions: Record<string, unknown>[];
+  rules: Record<string, unknown>[];
 }
 
 interface FakeDbOpts {
@@ -145,6 +147,7 @@ function fakeDb(seed: Partial<Tables> = {}, opts: FakeDbOpts = {}) {
     statement_extractions: [],
     statement_rows: [],
     transactions: [],
+    rules: [],
     ...seed,
   };
   const executed: { sql: string; args: unknown[] }[] = [];
@@ -286,6 +289,9 @@ function fakeDb(seed: Partial<Tables> = {}, opts: FakeDbOpts = {}) {
       t.statement_rows.push({ id, documentId, idx, fields, status, duplicate, lowestConfidence, createdAt });
       return { rows: [], changes: 1 };
     }
+
+    // --- rules (read by the sprint-13 enrichment at finalize) --------------
+    if (/FROM rules/i.test(sql)) return { rows: t.rules, changes: 0 };
 
     // --- transactions ------------------------------------------------------
     if (/SELECT fingerprint FROM transactions/i.test(sql)) {
@@ -524,7 +530,9 @@ describe('tick — poll once, harvest bounded, keep pending until every batch is
     expect(done.truncated).toBe(false);
     expect(done.rowCount).toBe(3);
     expect(done.progress).toBeNull();
-    expect(done.rows.map((r) => r.merchant.value)).toEqual(['b1-r1', 'b1-r2', 'b2-r1']);
+    // Sprint 13: proposals pass through cleanBankDescriptor at finalize, so
+    // the raw fixture names come back title-cased with separators flattened.
+    expect(done.rows.map((r) => r.merchant.value)).toEqual(['B1 R1', 'B1 R2', 'B2 R1']);
     expect(tables.statement_extractions[0].providerState).toBeNull();
   });
 
@@ -561,7 +569,7 @@ describe('tick — poll once, harvest bounded, keep pending until every batch is
     });
     const done = await runStatementExtraction(env, DOC, { fetchImpl: next.fetchImpl });
     expect(done.status).toBe('suggested');
-    expect(done.rows.map((r) => r.merchant.value)).toEqual(['a', 'b', 'c']);
+    expect(done.rows.map((r) => r.merchant.value)).toEqual(['A', 'B', 'C']);
   });
 
   it('one job failed + one done with rows → loud partial: status partial, truncated', async () => {
@@ -577,7 +585,7 @@ describe('tick — poll once, harvest bounded, keep pending until every batch is
     const done = await runStatementExtraction(env, DOC, { fetchImpl: api.fetchImpl });
     expect(done.status).toBe('partial');
     expect(done.truncated).toBe(true);
-    expect(done.rows.map((r) => r.merchant.value)).toEqual(['kept']);
+    expect(done.rows.map((r) => r.merchant.value)).toEqual(['Kept']);
     // A failed job has no results to fetch.
     expect(api.urls('/results')).toHaveLength(1);
   });
@@ -595,7 +603,7 @@ describe('tick — poll once, harvest bounded, keep pending until every batch is
     const done = await runStatementExtraction(env, DOC, { fetchImpl: api.fetchImpl });
     expect(done.status).toBe('partial');
     expect(done.truncated).toBe(true);
-    expect(done.rows.map((r) => r.merchant.value)).toEqual(['partial-read']);
+    expect(done.rows.map((r) => r.merchant.value)).toEqual(['Partial Read']);
   });
 
   it('every job failed → the run fails with a readable message, state cleared', async () => {
@@ -721,7 +729,7 @@ describe('the overall deadline', () => {
     // Progress was made this tick, so the hour-old age is irrelevant: the
     // pages were read and paid for, and the run finalizes with all rows.
     expect(done.status).toBe('suggested');
-    expect(done.rows.map((r) => r.merchant.value)).toEqual(['early', 'late']);
+    expect(done.rows.map((r) => r.merchant.value)).toEqual(['Early', 'Late']);
   });
 
   it('a run whose batches are ALL terminal finalizes even past the deadline — the pages were paid for', async () => {
@@ -734,7 +742,65 @@ describe('the overall deadline', () => {
     });
     const done = await runStatementExtraction(env, DOC, { fetchImpl: sarvamApi({}).fetchImpl });
     expect(done.status).toBe('suggested');
-    expect(done.rows.map((r) => r.merchant.value)).toEqual(['late-but-read']);
+    expect(done.rows.map((r) => r.merchant.value)).toEqual(['Late But Read']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Proposal enrichment at finalize (sprint 13) — end-to-end through the tick
+// ---------------------------------------------------------------------------
+
+describe('proposal enrichment at finalize', () => {
+  const RAW_UPI = 'UPI-SWIGGY LIMITED-swiggy@axis-402934857382-Payment';
+
+  it('cleans the descriptor and pre-flags duplicates against the CLEANED merchant', async () => {
+    const st = state([jobState('done', 'job-a', [rawRow(RAW_UPI)])]);
+    const { env, tables } = makeEnv(await pdfWithPages(5), {
+      settings: sarvamSettings(),
+      statement_extractions: [pendingJob(st)],
+      // The ledger already holds this charge under its CLEANED name — the
+      // fingerprint an eventual insert would get. The pre-flag must agree,
+      // which pins the ordering: enrichment BEFORE the duplicate pass.
+      transactions: [
+        {
+          id: 'tx-1',
+          fingerprint: txFingerprint('2026-03-04', 'Swiggy Limited', 100, 'Main Checking'),
+        },
+      ],
+    });
+
+    const done = await runStatementExtraction(env, DOC, { fetchImpl: sarvamApi({}).fetchImpl });
+    expect(done.status).toBe('suggested');
+    expect(done.rows[0].merchant.value).toBe('Swiggy Limited');
+    expect(done.rows[0].duplicate).toBe(true);
+    // The stored row carries the cleaned name too — not just the read view.
+    expect(tables.statement_rows[0].fields).toContain('"Swiggy Limited"');
+  });
+
+  it("fills a blank category from the user's own rules against the cleaned merchant, at confidence 1", async () => {
+    const st = state([
+      jobState('done', 'job-a', [{ ...rawRow(RAW_UPI), category: null }]),
+    ]);
+    const { env } = makeEnv(await pdfWithPages(5), {
+      settings: sarvamSettings(),
+      statement_extractions: [pendingJob(st)],
+      rules: [
+        {
+          id: 'rule-1',
+          whenText: 'merchant contains swiggy',
+          thenText: 'set category to Dining',
+          enabled: 1,
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+
+    const done = await runStatementExtraction(env, DOC, { fetchImpl: sarvamApi({}).fetchImpl });
+    expect(done.status).toBe('suggested');
+    // Confidence 1: a user-authored rule is deterministic knowledge, not
+    // model output — it must not trip the low-confidence review markers.
+    expect(done.rows[0].category).toEqual({ value: 'Dining', confidence: 1 });
+    expect(done.rows[0].lowestConfidence).toBeGreaterThan(0);
   });
 });
 

@@ -26,6 +26,7 @@ import {
   type UpcomingItem,
 } from '../components/flows/dashboardMath';
 import { PeriodSelector } from '../components/flows/PeriodSelector';
+import { MerchantQuestionCard } from '../components/questions/MerchantQuestionCard';
 import { Card, EmptyState } from '../components/ui';
 import { useStore } from '../store';
 
@@ -114,6 +115,9 @@ export default function Dashboard() {
           }
         />
       </div>
+
+      {/* Renders nothing while there is no question — no empty-state filler. */}
+      <MerchantQuestionCard />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
         <Card

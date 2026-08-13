@@ -33,6 +33,11 @@ import {
   runExtraction,
 } from './extractions';
 import { applyPreferences } from './preferences';
+import {
+  answerMerchantQuestion,
+  dismissMerchantQuestion,
+  readMerchantQuestions,
+} from './questions';
 import { readDocuments, readRules, readTags, readTransactions } from './queries';
 import { ensureSchema } from './schema';
 import { readSettings, writeSettings } from './settingsStore';
@@ -97,12 +102,15 @@ app.get('/api/state', async (c) => {
   // Extractions and statement jobs are scoped to the documents just returned,
   // so these reads are bounded by the same cap rather than growing with the vault.
   const documentIds = documents.map((d) => d.id);
-  const [extractions, statements, ruleSuggestions] = await Promise.all([
+  const [extractions, statements, ruleSuggestions, merchantQuestions] = await Promise.all([
     readExtractions(db, documentIds),
     readStatements(db, documentIds),
     // Reuses the rules/settings just read; its own reads are bounded
     // (CORRECTIONS_SCAN_LIMIT), so state stays O(1)-ish as corrections grow.
     readRuleSuggestions(db, rules, settings.categories),
+    // Sourced from the capped transactions read just made; its own reads are
+    // two key lists (answered profiles + dismissals).
+    readMerchantQuestions(db, transactions, rules),
   ]);
   const payload: StatePayload = {
     transactions,
@@ -113,6 +121,7 @@ app.get('/api/state', async (c) => {
     extractions,
     statements,
     ruleSuggestions,
+    merchantQuestions,
     inboxEmails,
     buildId: BUILD_ID,
   };
@@ -135,6 +144,8 @@ app.delete('/api/state', async (c) => {
     db.prepare('DELETE FROM statement_rows'),
     db.prepare('DELETE FROM category_corrections'),
     db.prepare('DELETE FROM rule_suggestion_dismissals'),
+    db.prepare('DELETE FROM merchant_profiles'),
+    db.prepare('DELETE FROM merchant_question_dismissals'),
     db.prepare('DELETE FROM inbox_emails'),
     db.prepare('DELETE FROM rules'),
     db.prepare('DELETE FROM tags'),
@@ -316,6 +327,21 @@ app.post('/api/rule-suggestions/dismiss', async (c) => {
   )
     .bind(suggestionKey(merchant, category), new Date().toISOString())
     .run();
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// "Getting to know you" merchant questions (sprint 14). Questions are
+// computed, never stored — /answer is the only path that writes a profile,
+// a rule, or (opt-in) recategorized rows.
+// ---------------------------------------------------------------------------
+
+app.post('/api/merchant-questions/answer', async (c) =>
+  c.json(await answerMerchantQuestion(c.env.DB, await readJson(c))),
+);
+
+app.post('/api/merchant-questions/dismiss', async (c) => {
+  await dismissMerchantQuestion(c.env.DB, await readJson(c));
   return c.json({ ok: true });
 });
 

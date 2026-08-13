@@ -32,7 +32,7 @@ import {
   senderEntryError,
   showEmptyAllowlistWarning,
 } from '../components/inbox/inboxHelpers';
-import { parseSarvamPriceDraft, sarvamPriceError } from '../components/ai/preflightHelpers';
+import { customMissingConfig, parseSarvamPriceDraft, sarvamPriceError } from '../components/ai/preflightHelpers';
 import { useStore } from '../store';
 import { Button, Card, EmptyState, Field, InlineError, Input, SegmentedControl, Spinner } from '../components/ui';
 
@@ -77,6 +77,8 @@ export default function Settings() {
         model={settings.aiModel}
         keySet={settings.aiKeySet}
         sarvamKeySet={settings.sarvamKeySet}
+        customKeySet={settings.customKeySet}
+        customBaseUrl={settings.customBaseUrl}
         sarvamPrice={settings.sarvamPricePerPage}
         onSaveProvider={async (provider) => {
           await updatePreferences({ aiProvider: provider });
@@ -96,6 +98,18 @@ export default function Settings() {
         }}
         onRemoveSarvamKey={async () => {
           await updatePreferences({ sarvamApiKey: null });
+          toast('success', 'API key removed.');
+        }}
+        onSaveCustomBaseUrl={async (url) => {
+          await updatePreferences({ customBaseUrl: url });
+          toast('success', url === '' ? 'Endpoint URL cleared.' : 'Endpoint URL saved.');
+        }}
+        onSaveCustomKey={async (key) => {
+          await updatePreferences({ customApiKey: key });
+          toast('success', 'API key saved.');
+        }}
+        onRemoveCustomKey={async () => {
+          await updatePreferences({ customApiKey: null });
           toast('success', 'API key removed.');
         }}
         onSaveSarvamPrice={async (price) => {
@@ -416,6 +430,7 @@ const AI_PROVIDER_OPTIONS: { value: AiProvider; label: string }[] = [
   { value: 'workers-ai', label: 'Workers AI' },
   { value: 'anthropic', label: 'Anthropic (BYOK)' },
   { value: 'sarvam', label: 'Sarvam (BYOK)' },
+  { value: 'custom', label: 'Custom endpoint (BYOK)' },
 ];
 
 const AI_PROVIDER_COPY: Record<AiProvider, string> = {
@@ -426,15 +441,18 @@ const AI_PROVIDER_COPY: Record<AiProvider, string> = {
     'Processed by Workers AI inside your own Cloudflare account — never sent to a third-party vendor.',
   anthropic:
     "Sends document images to Anthropic's API under YOUR key. Your key is stored in your database and never displayed again.",
+  custom:
+    'Sends documents to whatever endpoint YOU configure — your own server keeps data fully yours; a hosted endpoint sees what you send it.',
 };
 
 // Model override is shown for any active provider except 'off' — placeholder
 // reflects what that provider actually calls its models, so it never reads
 // like Anthropic naming while Workers AI is selected.
-const MODEL_PLACEHOLDER: Record<'workers-ai' | 'anthropic' | 'sarvam', string> = {
+const MODEL_PLACEHOLDER: Record<'workers-ai' | 'anthropic' | 'sarvam' | 'custom', string> = {
   'workers-ai': '@cf/meta/llama-3.1-8b-instruct',
   anthropic: 'claude-opus-5',
   sarvam: 'sarvam-vision-1.5',
+  custom: 'nvidia/nemotron-3.5-lightning-30b-a3b',
 };
 
 function AiSection({
@@ -442,12 +460,17 @@ function AiSection({
   model,
   keySet,
   sarvamKeySet,
+  customKeySet,
+  customBaseUrl,
   sarvamPrice,
   onSaveProvider,
   onSaveKey,
   onRemoveKey,
   onSaveSarvamKey,
   onRemoveSarvamKey,
+  onSaveCustomBaseUrl,
+  onSaveCustomKey,
+  onRemoveCustomKey,
   onSaveSarvamPrice,
   onSaveModel,
 }: {
@@ -455,12 +478,17 @@ function AiSection({
   model: string | null;
   keySet: boolean;
   sarvamKeySet: boolean;
+  customKeySet: boolean;
+  customBaseUrl: string;
   sarvamPrice: number | null;
   onSaveProvider: (provider: AiProvider) => Promise<void>;
   onSaveKey: (key: string) => Promise<void>;
   onRemoveKey: () => Promise<void>;
   onSaveSarvamKey: (key: string) => Promise<void>;
   onRemoveSarvamKey: () => Promise<void>;
+  onSaveCustomBaseUrl: (url: string) => Promise<void>;
+  onSaveCustomKey: (key: string) => Promise<void>;
+  onRemoveCustomKey: () => Promise<void>;
   onSaveSarvamPrice: (price: number | null) => Promise<void>;
   onSaveModel: (model: string | null) => Promise<void>;
 }) {
@@ -479,6 +507,17 @@ function AiSection({
   const [sarvamKeyBusy, setSarvamKeyBusy] = useState<'save' | 'remove' | null>(null);
   const [sarvamKeyError, setSarvamKeyError] = useState<string | null>(null);
 
+  // Custom endpoint (sprint 15): the base URL is a plain (visible) setting;
+  // the key mirrors the write-only pattern above but is OPTIONAL — keyless
+  // servers like local Ollama are a complete configuration without one.
+  const [baseUrlDraft, setBaseUrlDraft] = useState(customBaseUrl);
+  const [baseUrlBusy, setBaseUrlBusy] = useState(false);
+  const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
+  const [customKeyInputOpen, setCustomKeyInputOpen] = useState(!customKeySet);
+  const [customKeyDraft, setCustomKeyDraft] = useState('');
+  const [customKeyBusy, setCustomKeyBusy] = useState<'save' | 'remove' | null>(null);
+  const [customKeyError, setCustomKeyError] = useState<string | null>(null);
+
   const [priceDraft, setPriceDraft] = useState(sarvamPrice !== null ? String(sarvamPrice) : '');
   const [priceBusy, setPriceBusy] = useState(false);
   const [priceError, setPriceError] = useState<string | null>(null);
@@ -495,6 +534,9 @@ function AiSection({
   useEffect(() => {
     if (!sarvamKeySet) setSarvamKeyInputOpen(true);
   }, [sarvamKeySet]);
+  useEffect(() => {
+    if (!customKeySet) setCustomKeyInputOpen(true);
+  }, [customKeySet]);
 
   // Keep the model draft in sync with the saved value (e.g. after a save
   // elsewhere, or a danger-zone wipe resetting it to null). Same for the
@@ -505,10 +547,21 @@ function AiSection({
   useEffect(() => {
     setPriceDraft(sarvamPrice !== null ? String(sarvamPrice) : '');
   }, [sarvamPrice]);
+  // The saved base URL comes back normalized (trailing slashes stripped) —
+  // resync so the draft shows what was actually stored.
+  useEffect(() => {
+    setBaseUrlDraft(customBaseUrl);
+  }, [customBaseUrl]);
 
   const activeProvider = providerPending ?? provider;
   const anyBusy =
-    providerPending !== null || keyBusy !== null || sarvamKeyBusy !== null || priceBusy || modelBusy;
+    providerPending !== null ||
+    keyBusy !== null ||
+    sarvamKeyBusy !== null ||
+    customKeyBusy !== null ||
+    baseUrlBusy ||
+    priceBusy ||
+    modelBusy;
 
   // A half-typed key left over from browsing the Anthropic tab must not
   // linger once the user switches away — clear the draft, not the saved key.
@@ -518,6 +571,9 @@ function AiSection({
   }, [activeProvider]);
   useEffect(() => {
     if (activeProvider !== 'sarvam') setSarvamKeyDraft('');
+  }, [activeProvider]);
+  useEffect(() => {
+    if (activeProvider !== 'custom') setCustomKeyDraft('');
   }, [activeProvider]);
 
   async function handleProviderChange(next: AiProvider) {
@@ -593,6 +649,50 @@ function AiSection({
     }
   }
 
+  async function handleSaveBaseUrl() {
+    setBaseUrlBusy(true);
+    setBaseUrlError(null);
+    try {
+      // Sent as typed; the server validates and normalizes (its 400s carry
+      // the reason, e.g. http on a non-localhost host). '' clears.
+      await onSaveCustomBaseUrl(baseUrlDraft.trim());
+    } catch (e) {
+      setBaseUrlError(e instanceof Error ? e.message : 'Could not save. Try again.');
+    } finally {
+      setBaseUrlBusy(false);
+    }
+  }
+
+  async function handleSaveCustomKey() {
+    if (!customKeyDraft.trim()) {
+      setCustomKeyError('Enter an API key.');
+      return;
+    }
+    setCustomKeyBusy('save');
+    setCustomKeyError(null);
+    try {
+      await onSaveCustomKey(customKeyDraft.trim());
+      setCustomKeyDraft('');
+      setCustomKeyInputOpen(false);
+    } catch (e) {
+      setCustomKeyError(e instanceof Error ? e.message : 'Could not save the key. Try again.');
+    } finally {
+      setCustomKeyBusy(null);
+    }
+  }
+
+  async function handleRemoveCustomKey() {
+    setCustomKeyBusy('remove');
+    setCustomKeyError(null);
+    try {
+      await onRemoveCustomKey();
+    } catch (e) {
+      setCustomKeyError(e instanceof Error ? e.message : 'Could not remove the key. Try again.');
+    } finally {
+      setCustomKeyBusy(null);
+    }
+  }
+
   async function handleSavePrice() {
     const invalid = sarvamPriceError(priceDraft);
     if (invalid) {
@@ -664,7 +764,7 @@ function AiSection({
             - Model override shows for any provider except 'off' — Workers AI
               has an override too, just with Workers-AI-shaped model names.
           */}
-          {(keySet || sarvamKeySet || activeProvider !== 'off') && (
+          {(keySet || sarvamKeySet || customKeySet || activeProvider !== 'off') && (
             <div className="space-y-4 border-t border-border pt-4">
               {(keySet || activeProvider === 'anthropic') && (
                 <div>
@@ -807,6 +907,110 @@ function AiSection({
                 </div>
               )}
 
+              {activeProvider === 'custom' && (
+                <div>
+                  {customMissingConfig('custom', customBaseUrl, model) !== null && (
+                    <p className="mb-2 text-xs font-medium text-caution">
+                      Add the {customMissingConfig('custom', customBaseUrl, model)} below to start
+                      extracting. (No key needed for keyless servers.)
+                    </p>
+                  )}
+                  <Field
+                    label="Endpoint base URL"
+                    hint="Any OpenAI-compatible server: NVIDIA Build (https://integrate.api.nvidia.com/v1), OpenRouter, or your own Ollama/vLLM. http:// is allowed for localhost only, and only works when Ledgerly itself runs locally — a deployed Ledgerly can't reach your machine."
+                  >
+                    <Input
+                      value={baseUrlDraft}
+                      disabled={anyBusy}
+                      onChange={(e) => setBaseUrlDraft(e.target.value)}
+                      placeholder="https://integrate.api.nvidia.com/v1"
+                      className="max-w-md"
+                    />
+                  </Field>
+                  <div className="mt-2 flex justify-end">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={anyBusy || baseUrlDraft.trim() === customBaseUrl}
+                      loading={baseUrlBusy}
+                      onClick={() => void handleSaveBaseUrl()}
+                    >
+                      Save URL
+                    </Button>
+                  </div>
+                  <InlineError message={baseUrlError} />
+                </div>
+              )}
+
+              {(customKeySet || activeProvider === 'custom') && (
+                <div>
+                  <Field label="Endpoint API key (optional)">
+                    {!customKeyInputOpen ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusBadge label="Key saved ✓" tone="positive" />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={anyBusy}
+                          onClick={() => setCustomKeyInputOpen(true)}
+                        >
+                          Replace
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={anyBusy}
+                          loading={customKeyBusy === 'remove'}
+                          onClick={() => void handleRemoveCustomKey()}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          type="password"
+                          autoComplete="off"
+                          value={customKeyDraft}
+                          disabled={anyBusy}
+                          onChange={(e) => setCustomKeyDraft(e.target.value)}
+                          placeholder="nvapi-… / sk-or-…"
+                          className="max-w-xs"
+                        />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={anyBusy || !customKeyDraft.trim()}
+                          loading={customKeyBusy === 'save'}
+                          onClick={() => void handleSaveCustomKey()}
+                        >
+                          Save key
+                        </Button>
+                        {customKeySet && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={anyBusy}
+                            onClick={() => {
+                              setCustomKeyInputOpen(false);
+                              setCustomKeyDraft('');
+                              setCustomKeyError(null);
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                    <p className="mt-1.5 text-xs text-muted">
+                      Leave empty for keyless servers like local Ollama. Write-only — once saved,
+                      the key itself is never shown again.
+                    </p>
+                  </Field>
+                  <InlineError message={customKeyError} />
+                </div>
+              )}
+
               {activeProvider === 'sarvam' && (
                 <div>
                   <Field
@@ -842,7 +1046,17 @@ function AiSection({
 
               {activeProvider !== 'off' && (
                 <div>
-                  <Field label="Model override (optional)" hint="Leave blank to use the default model.">
+                  <Field
+                    // The same saved field (aiModel) either overrides a
+                    // provider default or, for the custom endpoint, IS the
+                    // model — a custom server has no default we could know.
+                    label={activeProvider === 'custom' ? 'Model id (required)' : 'Model override (optional)'}
+                    hint={
+                      activeProvider === 'custom'
+                        ? 'Required — your endpoint has no default model Ledgerly could know. Use the id your server expects, e.g. nvidia/nemotron-3.5-lightning-30b-a3b on NVIDIA Build (pick a vision-capable model for receipts).'
+                        : 'Leave blank to use the default model.'
+                    }
+                  >
                     <Input
                       value={modelDraft}
                       disabled={anyBusy}

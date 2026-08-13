@@ -31,8 +31,22 @@ export const BRIEFING_TOKEN_SECRET_KEY = 'briefingWhatsappTokenSecret';
  */
 export const SARVAM_KEY_SECRET_KEY = 'sarvamApiKeySecret';
 
+/**
+ * Where the custom-endpoint API key is stored (sprint 15). Same containment
+ * as the BYOK key above: NOT a `defaultSettings()` key, so `readSettings` can
+ * never copy it into a payload; `Settings.customKeySet` is derived from its
+ * presence instead. Unlike the other secrets this one is optional even when
+ * its provider is active — keyless servers (local Ollama) need none.
+ */
+export const CUSTOM_KEY_SECRET_KEY = 'customApiKeySecret';
+
 /** Every write-only settings row. Grows here, and ONLY here, per secret. */
-const SECRET_KEYS = [AI_KEY_SECRET_KEY, BRIEFING_TOKEN_SECRET_KEY, SARVAM_KEY_SECRET_KEY] as const;
+const SECRET_KEYS = [
+  AI_KEY_SECRET_KEY,
+  BRIEFING_TOKEN_SECRET_KEY,
+  SARVAM_KEY_SECRET_KEY,
+  CUSTOM_KEY_SECRET_KEY,
+] as const;
 
 interface SettingRow {
   key: string;
@@ -79,6 +93,7 @@ export async function readSettings(db: D1Database): Promise<Settings> {
   let keyStored = false;
   let briefingTokenStored = false;
   let sarvamKeyStored = false;
+  let customKeyStored = false;
   for (const row of results ?? []) {
     // Secrets are the rows we read but never copy: only the boolean
     // "is there one" escapes this loop.
@@ -92,6 +107,10 @@ export async function readSettings(db: D1Database): Promise<Settings> {
     }
     if (row.key === SARVAM_KEY_SECRET_KEY) {
       sarvamKeyStored = decodeSecret(row.value) !== null;
+      continue;
+    }
+    if (row.key === CUSTOM_KEY_SECRET_KEY) {
+      customKeyStored = decodeSecret(row.value) !== null;
       continue;
     }
     if (!(row.key in out)) continue; // internal keys stay out of the client payload
@@ -109,6 +128,7 @@ export async function readSettings(db: D1Database): Promise<Settings> {
   out.aiKeySet = keyStored;
   out.briefingWhatsappTokenSet = briefingTokenStored;
   out.sarvamKeySet = sarvamKeyStored;
+  out.customKeySet = customKeyStored;
   return out as unknown as Settings;
 }
 
@@ -173,6 +193,22 @@ export async function writeSarvamApiKey(db: D1Database, key: string): Promise<vo
 /** Removing the row is what makes `sarvamKeySet` false again. */
 export async function clearSarvamApiKey(db: D1Database): Promise<void> {
   await db.prepare('DELETE FROM settings WHERE key = ?').bind(SARVAM_KEY_SECRET_KEY).run();
+}
+
+/** The plaintext custom-endpoint key, or null when none is stored — which is
+ * a VALID running state for this provider (keyless servers), not an error.
+ * Never leaves the worker. */
+export async function readCustomApiKey(db: D1Database): Promise<string | null> {
+  return readSecret(db, CUSTOM_KEY_SECRET_KEY);
+}
+
+export async function writeCustomApiKey(db: D1Database, key: string): Promise<void> {
+  await writeSettings(db, { [CUSTOM_KEY_SECRET_KEY]: key });
+}
+
+/** Removing the row is what makes `customKeySet` false again. */
+export async function clearCustomApiKey(db: D1Database): Promise<void> {
+  await db.prepare('DELETE FROM settings WHERE key = ?').bind(CUSTOM_KEY_SECRET_KEY).run();
 }
 
 /** Upsert only the given keys — unrelated settings are never touched (spec §4.5). */

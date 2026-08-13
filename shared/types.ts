@@ -147,6 +147,13 @@ export interface Settings {
   aiKeySet: boolean;
   /** Whether a Sarvam API key is stored. Write-only, NEVER echoed. */
   sarvamKeySet: boolean;
+  /** Base URL of a user-configured OpenAI-compatible endpoint (sprint 15),
+   * e.g. 'https://integrate.api.nvidia.com/v1' or a local Ollama server.
+   * Stored normalized (no trailing slash); '' = not configured. */
+  customBaseUrl: string;
+  /** Whether a custom-endpoint API key is stored. Write-only, NEVER echoed.
+   * The key itself is OPTIONAL — keyless servers (local Ollama) are valid. */
+  customKeySet: boolean;
   /** User-entered Sarvam per-page price (their dashboard rate) for honest
    * cost estimates; null = no estimate shown, never a guessed price. */
   sarvamPricePerPage: number | null;
@@ -169,7 +176,7 @@ export interface Settings {
   emailAllowedSenders: string[];
 }
 
-export type AiProvider = 'off' | 'workers-ai' | 'anthropic' | 'sarvam';
+export type AiProvider = 'off' | 'workers-ai' | 'anthropic' | 'sarvam' | 'custom';
 
 export type BriefingCadence = 'daily' | 'weekly';
 
@@ -218,6 +225,8 @@ export function defaultSettings(): Settings {
     aiModel: null,
     aiKeySet: false,
     sarvamKeySet: false,
+    customBaseUrl: '',
+    customKeySet: false,
     sarvamPricePerPage: null,
     briefingsEnabled: false,
     briefingCadence: 'weekly',
@@ -247,6 +256,9 @@ export interface StatePayload {
   statements?: StatementExtraction[];
   /** Rule suggestions learned from category corrections (sprint 5). */
   ruleSuggestions?: RuleSuggestion[];
+  /** "Getting to know you" merchant questions (sprint 14): top-ranked first,
+   * capped at 3 — a drip, never a wall. */
+  merchantQuestions?: MerchantQuestion[];
   /** Mail-in feed inbox (sprint 8): newest first, capped at 100. */
   inboxEmails?: InboxEmail[];
   /** Build id of the deployment serving this response (version-skew detection); absent on older servers. */
@@ -315,6 +327,45 @@ export interface RuleSuggestion {
   evidenceCount: number;
   /** ISO timestamp of the most recent agreeing correction. */
   lastSeen: string;
+}
+
+// ---------------------------------------------------------------------------
+// "Getting to know you" merchant questions (sprint 14). Sparse, high-value
+// questions — "who is this merchant?" — whose answers permanently teach the
+// app (a stored profile + a real rule). Deterministic, zero AI: candidates
+// come from repeated transactions the app demonstrably does not understand.
+// ---------------------------------------------------------------------------
+
+export type MerchantKind = 'person' | 'business';
+
+/** One question the Dashboard may ask. Computed, never stored — answering or
+ * dismissing is what writes anything. */
+export interface MerchantQuestion {
+  /** Stable key: the cleaned (cleanBankDescriptor), lowercased merchant. */
+  id: string;
+  /** Display name — the cleaned merchant as seen on the most recent transaction. */
+  merchant: string;
+  /** Transactions grouped under this merchant. */
+  txCount: number;
+  /** Sum of their amounts (positive magnitudes). */
+  total: number;
+  /** Date (YYYY-MM-DD) of the newest transaction in the group. */
+  mostRecent: string;
+  /** Heuristic default for the UI's Person/Business toggle — a HINT only,
+   * never stored without the user's answer. null = no opinion. */
+  suggestedKind: MerchantKind | null;
+}
+
+/** Body for POST /api/merchant-questions/answer. */
+export interface MerchantAnswerInput {
+  /** The question's display merchant. */
+  merchant: string;
+  kind: MerchantKind | null;
+  /** Optional friendly name; defaults to the display merchant. */
+  label?: string;
+  category: string;
+  /** Also recategorize this merchant's existing 'Needs review' transactions. */
+  applyToExisting: boolean;
 }
 
 /**
@@ -494,6 +545,11 @@ export interface PreferencesUpdate {
   /** Write-only Sarvam key; null clears (aiApiKey semantics). */
   sarvamApiKey?: string | null;
   sarvamPricePerPage?: number | null;
+  /** Custom endpoint base URL; '' clears. Validated + normalized server-side. */
+  customBaseUrl?: string;
+  /** Write-only custom-endpoint key; null clears (aiApiKey semantics).
+   * Optional even when the provider is active — keyless servers exist. */
+  customApiKey?: string | null;
   briefingsEnabled?: boolean;
   briefingCadence?: BriefingCadence;
   /** E.164 digits without '+', or '' to clear. */

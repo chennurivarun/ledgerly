@@ -7,6 +7,8 @@ import {
   type DocumentMeta,
   type ExtractionResult,
   type InboxEmail,
+  type MerchantAnswerInput,
+  type MerchantQuestion,
   type PatchTxInput,
   type Period,
   type PreferencesUpdate,
@@ -55,6 +57,7 @@ interface AppStore {
   extractions: ExtractionResult[];
   statements: StatementExtraction[];
   ruleSuggestions: RuleSuggestion[];
+  merchantQuestions: MerchantQuestion[];
   inboxEmails: InboxEmail[];
   activeModal: ModalKind;
   toasts: Toast[];
@@ -95,6 +98,14 @@ interface AppStore {
   acceptRuleSuggestion(s: RuleSuggestion): Promise<void>;
   /** Suppress a suggestion permanently for this merchant/category pair. */
   dismissRuleSuggestion(s: RuleSuggestion): Promise<void>;
+  /** Answer a "Getting to know you" question: updates rules, advances the
+   * queue locally, then refreshes from the source of truth. */
+  answerMerchantQuestion(
+    q: MerchantQuestion,
+    input: MerchantAnswerInput,
+  ): Promise<{ rules: Rule[]; recategorized: number }>;
+  /** Skip a question — suppressed permanently for this merchant. */
+  dismissMerchantQuestion(q: MerchantQuestion): Promise<void>;
   /** Confirm a mail-in proposal → creates the transaction. */
   confirmInboxEmail(id: string, input: TxInput): Promise<BatchInsertResult>;
   dismissInboxEmail(id: string): Promise<void>;
@@ -157,6 +168,7 @@ export const useStore = create<AppStore>((set, get) => ({
   extractions: [],
   statements: [],
   ruleSuggestions: [],
+  merchantQuestions: [],
   inboxEmails: [],
   activeModal: null,
   toasts: [],
@@ -176,6 +188,7 @@ export const useStore = create<AppStore>((set, get) => ({
         extractions: s.extractions ?? [],
         statements: mergeStatements(st.statements, s.statements ?? []),
         ruleSuggestions: s.ruleSuggestions ?? [],
+        merchantQuestions: s.merchantQuestions ?? [],
         inboxEmails: s.inboxEmails ?? [],
         serverBuildId: s.buildId ?? null,
       }));
@@ -328,6 +341,7 @@ export const useStore = create<AppStore>((set, get) => ({
         extractions: s.extractions ?? [],
         statements: mergeStatements(st.statements, s.statements ?? []),
         ruleSuggestions: s.ruleSuggestions ?? [],
+        merchantQuestions: s.merchantQuestions ?? [],
         inboxEmails: s.inboxEmails ?? [],
         serverBuildId: s.buildId ?? null,
       }));
@@ -348,6 +362,25 @@ export const useStore = create<AppStore>((set, get) => ({
     await api.dismissRuleSuggestion({ merchant: sug.merchant, category: sug.category });
     set((st) => ({
       ruleSuggestions: st.ruleSuggestions.filter((x) => x.id !== sug.id),
+    }));
+  },
+
+  async answerMerchantQuestion(q, input) {
+    const res = await api.answerMerchantQuestion(input);
+    // Advance the queue immediately (the next question appears); the refresh
+    // reconciles rules, recategorized rows and any newly eligible question.
+    set((st) => ({
+      rules: res.rules,
+      merchantQuestions: st.merchantQuestions.filter((x) => x.id !== q.id),
+    }));
+    void get().refreshQuiet();
+    return res;
+  },
+
+  async dismissMerchantQuestion(q) {
+    await api.dismissMerchantQuestion({ merchant: q.merchant });
+    set((st) => ({
+      merchantQuestions: st.merchantQuestions.filter((x) => x.id !== q.id),
     }));
   },
 
