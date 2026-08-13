@@ -424,7 +424,9 @@ app.post('/api/documents/:id/statement/pages/finalize', async (c) =>
 );
 
 app.post('/api/documents/:id/statement/pages/abort', async (c) =>
-  c.json(await abortClientStatement(c.env, c.req.param('id'))),
+  // Body is optional (unload-time aborts may send none); when present it can
+  // carry the runId that scopes the cancel to its own run.
+  c.json(await abortClientStatement(c.env, c.req.param('id'), await readJson(c).catch(() => null))),
 );
 
 app.post('/api/documents/:id/statement/confirm', async (c) =>

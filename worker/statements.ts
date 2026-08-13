@@ -247,6 +247,12 @@ interface ClientPagesState {
   v: 1;
   mode: 'client-pages';
   beganAt: string;
+  /** Scopes round/finalize/abort to the begin that issued them. Live
+   * incident 2026-08-13: a reloading tab's best-effort abort landed AFTER a
+   * fresh begin in the new tab and killed the new run — a stale caller must
+   * be a no-op, never a cancel. Optional only for states written before this
+   * field existed (cross-deploy compat); absent means "match anything". */
+  runId?: string;
 }
 
 /** The one reader of a client-pages blob; anything else is null. */
@@ -260,7 +266,20 @@ export function parseClientPagesState(raw: string | null | undefined): ClientPag
   }
   if (!isRecord(parsed) || parsed.v !== 1 || parsed.mode !== 'client-pages') return null;
   if (typeof parsed.beganAt !== 'string') return null;
+  if (parsed.runId !== undefined && typeof parsed.runId !== 'string') return null;
   return parsed as unknown as ClientPagesState;
+}
+
+/** Optional runId off a request body — absent is fine (legacy clients). */
+function readRunId(body: unknown): string | null {
+  if (!isRecord(body)) return null;
+  return typeof body.runId === 'string' && body.runId !== '' ? body.runId : null;
+}
+
+/** Whether a caller's runId is allowed to act on this state: both known and
+ * different = a stale caller from a superseded run. */
+function runIdMismatch(state: ClientPagesState, callerRunId: string | null): boolean {
+  return typeof state.runId === 'string' && callerRunId !== null && state.runId !== callerRunId;
 }
 
 /** POST /statement/extract while a browser holds the claim — same words as
@@ -1124,7 +1143,7 @@ export async function runStatementExtraction(
 export async function beginClientStatement(
   env: Env,
   documentId: string,
-): Promise<{ ok: true }> {
+): Promise<{ ok: true; runId: string }> {
   const doc = await readDocumentRow(env.DB, documentId);
   const settings = await readSettings(env.DB);
   const now = new Date().toISOString();
@@ -1137,14 +1156,22 @@ export async function beginClientStatement(
   assertStatementMime(doc.mimeType);
 
   await claimStatement(env.DB, documentId, provider, model, now);
-  await writeProviderState(env.DB, documentId, { v: 1, mode: 'client-pages', beganAt: now }, now);
-  return { ok: true };
+  const runId = crypto.randomUUID();
+  await writeProviderState(
+    env.DB,
+    documentId,
+    { v: 1, mode: 'client-pages', beganAt: now, runId },
+    now,
+  );
+  return { ok: true, runId };
 }
 
-/** The pending client-pages claim, or the readable 409 for anything else. */
+/** The pending client-pages claim, or the readable 409 for anything else —
+ * including a caller whose runId belongs to a superseded run. */
 async function requireClientClaim(
   db: D1Database,
   documentId: string,
+  callerRunId: string | null = null,
 ): Promise<{ job: JobRow; state: ClientPagesState }> {
   const current = await db
     .prepare(`SELECT ${JOB_SELECT_COLUMNS} FROM statement_extractions WHERE documentId = ?`)
@@ -1152,6 +1179,9 @@ async function requireClientClaim(
     .first<JobRow>();
   const state = current ? parseClientPagesState(current.providerState) : null;
   if (!current || current.status !== 'pending' || !state) {
+    throw new ApiFail(409, NO_CLIENT_READ_MESSAGE);
+  }
+  if (runIdMismatch(state, callerRunId)) {
     throw new ApiFail(409, NO_CLIENT_READ_MESSAGE);
   }
   return { job: current, state };
@@ -1173,7 +1203,7 @@ export async function clientStatementRound(
   deps: CustomDeps = {},
 ): Promise<StatementPagesRoundResult> {
   await readDocumentRow(env.DB, documentId);
-  const { state } = await requireClientClaim(env.DB, documentId);
+  const { state } = await requireClientClaim(env.DB, documentId, readRunId(body));
   const pages = validateRoundPages(body);
 
   const settings = await readSettings(env.DB);
@@ -1221,7 +1251,7 @@ export async function finalizeClientStatement(
   body: unknown,
 ): Promise<StatementExtraction> {
   await readDocumentRow(env.DB, documentId);
-  const { job: current } = await requireClientClaim(env.DB, documentId);
+  const { job: current } = await requireClientClaim(env.DB, documentId, readRunId(body));
 
   if (!isRecord(body) || !Array.isArray(body.rows)) {
     throw new ApiFail(400, 'Send the rows this read produced.');
@@ -1282,13 +1312,23 @@ export async function finalizeClientStatement(
  * message and its claim cleared; anything else (no job, a settled job, a
  * Sarvam resumable run) is left exactly alone.
  */
-export async function abortClientStatement(env: Env, documentId: string): Promise<{ ok: true }> {
+export async function abortClientStatement(
+  env: Env,
+  documentId: string,
+  body: unknown = null,
+): Promise<{ ok: true }> {
   await readDocumentRow(env.DB, documentId);
   const current = await env.DB
     .prepare(`SELECT ${JOB_SELECT_COLUMNS} FROM statement_extractions WHERE documentId = ?`)
     .bind(documentId)
     .first<JobRow>();
-  if (!current || current.status !== 'pending' || !parseClientPagesState(current.providerState)) {
+  const state = current ? parseClientPagesState(current.providerState) : null;
+  if (!current || current.status !== 'pending' || !state) {
+    return { ok: true };
+  }
+  // A stale tab's late abort (it reloaded mid-read; a NEWER begin owns the
+  // claim now) must not cancel the newer run: mismatched runId no-ops.
+  if (runIdMismatch(state, readRunId(body))) {
     return { ok: true };
   }
   const now = new Date().toISOString();

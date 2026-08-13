@@ -525,6 +525,8 @@ export interface StatementPageInput {
 /** POST .../statement/pages/round body. */
 export interface StatementPagesRoundInput {
   pages: StatementPageInput[];
+  /** Scopes the round to the begin that issued it (stale-tab safety). */
+  runId?: string;
 }
 
 /** POST .../statement/pages/round response: raw rows, nothing persisted. */
@@ -542,6 +544,8 @@ export interface StatementPagesFinalizeInput {
   rows: unknown[];
   /** True when any round failed after retries or pages were skipped. */
   truncated: boolean;
+  /** Scopes the finalize to the begin that issued it (stale-tab safety). */
+  runId?: string;
 }
 
 /** POST /api/transactions — single or batch */

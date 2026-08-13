@@ -123,9 +123,9 @@ export class ClientReadCancelled extends Error {
   }
 }
 
-function checkCancelled(token: CancelToken, documentId: string): void {
+function checkCancelled(token: CancelToken, documentId: string, runId: string): void {
   if (!token.cancelled) return;
-  void api.abortStatementPages(documentId).catch(() => undefined);
+  void api.abortStatementPages(documentId, runId).catch(() => undefined);
   throw new ClientReadCancelled();
 }
 
@@ -219,6 +219,7 @@ export async function extractStatementPages(
   onProgress: (label: string) => void,
   token: CancelToken,
   documentId: string,
+  runId: string,
 ): Promise<ExtractedPages> {
   const pdfjs = await loadPdfjs();
   const task = pdfjs.getDocument({ data: bytes });
@@ -230,7 +231,7 @@ export async function extractStatementPages(
     let truncated = total > cap;
 
     for (let i = 1; i <= cap; i++) {
-      checkCancelled(token, documentId);
+      checkCancelled(token, documentId, runId);
       onProgress(preparingLabel(i, cap));
       const page = await doc.getPage(i);
       const text = joinTextItems((await page.getTextContent()).items);
@@ -264,14 +265,15 @@ async function roundWithRetry(
   documentId: string,
   pages: StatementPageInput[],
   token: CancelToken,
+  runId: string,
 ): Promise<{ rows: unknown[]; truncated: boolean }> {
   try {
-    return await api.statementPagesRound(documentId, { pages });
+    return await api.statementPagesRound(documentId, { pages, runId });
   } catch {
-    checkCancelled(token, documentId);
+    checkCancelled(token, documentId, runId);
     await sleep(ROUND_RETRY_DELAY_MS);
-    checkCancelled(token, documentId);
-    return await api.statementPagesRound(documentId, { pages });
+    checkCancelled(token, documentId, runId);
+    return await api.statementPagesRound(documentId, { pages, runId });
   }
 }
 
@@ -290,15 +292,18 @@ export async function runClientStatementRead(
   token: CancelToken,
 ): Promise<StatementExtraction> {
   onProgress('Preparing…');
-  await api.beginStatementPages(documentId);
+  // The runId scopes every later call — including the best-effort aborts —
+  // to THIS run, so a stale tab's late cancel can never kill a newer read
+  // (live incident 2026-08-13: a mid-read reload did exactly that).
+  const { runId } = await api.beginStatementPages(documentId);
   try {
-    checkCancelled(token, documentId);
+    checkCancelled(token, documentId, runId);
     const res = await fetch(api.documentDownloadUrl(documentId));
     if (!res.ok) throw new Error('Could not download the statement from the vault.');
     const bytes = await res.arrayBuffer();
-    checkCancelled(token, documentId);
+    checkCancelled(token, documentId, runId);
 
-    const extracted = await extractStatementPages(bytes, onProgress, token, documentId);
+    const extracted = await extractStatementPages(bytes, onProgress, token, documentId, runId);
     if (extracted.pages.length === 0) {
       throw new Error('No readable pages were found in this PDF.');
     }
@@ -306,7 +311,7 @@ export async function runClientStatementRead(
     const rows: unknown[] = [];
     let truncated = extracted.truncated;
     for (const round of chunkPages(extracted.pages)) {
-      checkCancelled(token, documentId);
+      checkCancelled(token, documentId, runId);
       onProgress(
         pagesProgressLabel(
           round[0].index + 1,
@@ -315,7 +320,7 @@ export async function runClientStatementRead(
         ),
       );
       try {
-        const out = await roundWithRetry(documentId, round, token);
+        const out = await roundWithRetry(documentId, round, token, runId);
         rows.push(...out.rows);
         if (out.truncated) truncated = true;
       } catch (err) {
@@ -326,13 +331,13 @@ export async function runClientStatementRead(
       }
     }
 
-    checkCancelled(token, documentId);
+    checkCancelled(token, documentId, runId);
     onProgress('Finishing…');
-    return await api.finalizeStatementPages(documentId, { rows, truncated });
+    return await api.finalizeStatementPages(documentId, { rows, truncated, runId });
   } catch (err) {
     if (!(err instanceof ClientReadCancelled)) {
       // The claim must not linger behind a read that died before finalize.
-      void api.abortStatementPages(documentId).catch(() => undefined);
+      void api.abortStatementPages(documentId, runId).catch(() => undefined);
     }
     throw err;
   }

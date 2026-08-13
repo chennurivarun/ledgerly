@@ -579,13 +579,17 @@ describe('runStatementPagesRound — grouping', () => {
 describe('beginClientStatement', () => {
   it('claims the job and parks the client-pages state the tick path must refuse', async () => {
     const { env, tables } = makeEnv({ settings: customSettings() });
-    expect(await beginClientStatement(env, DOC)).toEqual({ ok: true });
+    const begun = await beginClientStatement(env, DOC);
+    expect(begun.ok).toBe(true);
+    // The runId scopes every later round/finalize/abort to THIS run.
+    expect(typeof begun.runId).toBe('string');
+    expect(begun.runId).not.toBe('');
 
     const job = tables.statement_extractions[0];
     expect(job.status).toBe('pending');
     expect(job.provider).toBe('custom');
     const state = parseClientPagesState(job.providerState);
-    expect(state).toMatchObject({ v: 1, mode: 'client-pages' });
+    expect(state).toMatchObject({ v: 1, mode: 'client-pages', runId: begun.runId });
 
     // THE isolation pins: the Sarvam resumable reader refuses this blob, so
     // progress stays null — which is exactly the signal the S12 tick driver
@@ -620,7 +624,7 @@ describe('beginClientStatement', () => {
 
   it('a keyless custom endpoint is fully valid — the key is optional here too', async () => {
     const { env } = makeEnv({ settings: customSettings({ customApiKeySecret: undefined }) });
-    expect(await beginClientStatement(env, DOC)).toEqual({ ok: true });
+    expect(await beginClientStatement(env, DOC)).toMatchObject({ ok: true });
   });
 
   it('refuses non-PDF mimes with the statement mime copy', async () => {
@@ -642,7 +646,7 @@ describe('beginClientStatement', () => {
       settings: customSettings(),
       statement_extractions: [clientPendingJob({ updatedAt: minutesAgo(5), createdAt: minutesAgo(5) })],
     });
-    expect(await beginClientStatement(stale.env, DOC)).toEqual({ ok: true });
+    expect(await beginClientStatement(stale.env, DOC)).toMatchObject({ ok: true });
     const state = parseClientPagesState(stale.tables.statement_extractions[0].providerState);
     expect(state).not.toBeNull();
     // A fresh claim, not the abandoned one.
@@ -989,6 +993,52 @@ describe('abortClientStatement', () => {
     await abortClientStatement(sarvamRun.env, DOC);
     expect(sarvamRun.tables.statement_extractions[0].status).toBe('pending');
     expect(sarvamRun.tables.statement_extractions[0].providerState).toBe(sarvamState);
+  });
+});
+
+describe('runId scoping — a stale tab can never touch a newer run', () => {
+  // Live incident 2026-08-13: a mid-read reload's best-effort abort landed
+  // AFTER the new tab's begin and cancelled the NEW run.
+  const stateWithRun = (runId: string) =>
+    JSON.stringify({ v: 1, mode: 'client-pages', beganAt: NOW_ISH(), runId });
+
+  it('an abort carrying a superseded runId is a no-op success', async () => {
+    const { env, tables } = makeEnv({
+      settings: customSettings(),
+      statement_extractions: [clientPendingJob({ providerState: stateWithRun('run-NEW') })],
+    });
+    expect(await abortClientStatement(env, DOC, { runId: 'run-OLD' })).toEqual({ ok: true });
+    expect(tables.statement_extractions[0].status).toBe('pending');
+    expect(parseClientPagesState(tables.statement_extractions[0].providerState)).not.toBeNull();
+  });
+
+  it('an abort carrying the OWNING runId still cancels', async () => {
+    const { env, tables } = makeEnv({
+      settings: customSettings(),
+      statement_extractions: [clientPendingJob({ providerState: stateWithRun('run-NEW') })],
+    });
+    await abortClientStatement(env, DOC, { runId: 'run-NEW' });
+    expect(tables.statement_extractions[0].status).toBe('failed');
+    expect(tables.statement_extractions[0].error).toBe(CLIENT_ABORT_MESSAGE);
+  });
+
+  it('a round from a superseded runId 409s instead of riding the new claim', async () => {
+    const { env } = makeEnv({
+      settings: customSettings(),
+      statement_extractions: [clientPendingJob({ providerState: stateWithRun('run-NEW') })],
+    });
+    await expect(
+      clientStatementRound(env, DOC, { pages: [textPage(0)], runId: 'run-OLD' }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('legacy state without a runId accepts any caller (cross-deploy compat)', async () => {
+    const { env, tables } = makeEnv({
+      settings: customSettings(),
+      statement_extractions: [clientPendingJob()],
+    });
+    await abortClientStatement(env, DOC, { runId: 'run-ANY' });
+    expect(tables.statement_extractions[0].status).toBe('failed');
   });
 });
 

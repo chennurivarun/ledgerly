@@ -131,9 +131,11 @@ export const api = {
       { method: 'POST' },
     ),
 
-  /** Claim a statement for the browser-pages read (custom provider, S16). */
+  /** Claim a statement for the browser-pages read (custom provider, S16).
+   * The returned runId scopes every later round/finalize/abort to THIS run —
+   * a stale tab's late abort can no longer cancel a newer read. */
   beginStatementPages: (id: string) =>
-    request<{ ok: true }>(
+    request<{ ok: true; runId: string }>(
       `/api/documents/${encodeURIComponent(id)}/statement/pages/begin`,
       { method: 'POST' },
     ),
@@ -152,11 +154,11 @@ export const api = {
       { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(input) },
     ),
 
-  /** Best-effort cancel of a browser read (unload/cancel). */
-  abortStatementPages: (id: string) =>
+  /** Best-effort cancel of a browser read (unload/cancel), scoped to runId. */
+  abortStatementPages: (id: string, runId: string) =>
     request<{ ok: true }>(
       `/api/documents/${encodeURIComponent(id)}/statement/pages/abort`,
-      { method: 'POST' },
+      { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ runId }) },
     ),
 
   /** Import the rows the user selected (and possibly edited). */
