@@ -19,11 +19,12 @@ import {
   assertStatementMime,
   selectStatementProvider,
 } from '../worker/ai/providers';
-import { defaultSettings, type Settings } from '../shared/types';
+import { defaultSettings, type Rule, type Settings } from '../shared/types';
 import {
   claimStatement,
   confirmStatementRows,
   defaultStatementAccount,
+  enrichStatementRows,
   flagDuplicates,
   statementRowFingerprint,
 } from '../worker/statements';
@@ -387,6 +388,137 @@ describe('defaultStatementAccount', () => {
 
   it('falls back to the shared import default when none are managed', () => {
     expect(defaultStatementAccount([])).toBe('Imported account');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Proposal enrichment (sprint 13) — proposals arrive organized, not raw
+// ---------------------------------------------------------------------------
+
+describe('enrichStatementRows', () => {
+  const RAW_UPI = 'UPI-SWIGGY LIMITED-swiggy@axis-402934857382-Payment';
+
+  function rule(whenText: string, thenText: string, enabled = true): Rule {
+    return {
+      id: whenText + thenText,
+      whenText,
+      thenText,
+      enabled,
+      createdAt: '2026-01-01T00:00:00Z',
+    };
+  }
+
+  const DINING_RULE = [rule('merchant contains swiggy', 'set category to Dining')];
+
+  it('cleans the merchant but keeps the read confidence — the confidence still describes the read', () => {
+    const [out] = enrichStatementRows(
+      [fieldsOf({ merchant: { value: RAW_UPI, confidence: 0.8 } })],
+      [],
+      CATEGORIES,
+    );
+    expect(out.merchant).toEqual({ value: 'Swiggy Limited', confidence: 0.8 });
+    // Nothing else moved.
+    expect(out.date).toEqual({ value: '2026-03-04', confidence: 0.9 });
+    expect(out.amount).toEqual({ value: 41.2, confidence: 0.95 });
+    expect(out.type).toEqual({ value: 'expense', confidence: 0.99 });
+  });
+
+  // The composition the sprint exists for: the rule matches the CLEANED
+  // merchant, so a rule written against "swiggy" fires on the raw descriptor.
+  it('fills a null category from the user’s own rules, at confidence 1', () => {
+    const [out] = enrichStatementRows(
+      [
+        fieldsOf({
+          merchant: { value: RAW_UPI, confidence: 0.8 },
+          category: { value: null, confidence: 0 },
+        }),
+      ],
+      DINING_RULE,
+      CATEGORIES,
+    );
+    // Confidence 1 is deliberate: a rule the user wrote or accepted is
+    // deterministic user-authored knowledge, not model output — it must not
+    // trip the review screen's low-confidence markers.
+    expect(out.category).toEqual({ value: 'Dining', confidence: 1 });
+  });
+
+  it('leaves a null category exactly as-was when no rule fires — the Needs-review fallback stays honest', () => {
+    const [out] = enrichStatementRows(
+      [
+        fieldsOf({
+          merchant: { value: 'Tesco', confidence: 0.8 },
+          category: { value: null, confidence: 0 },
+        }),
+      ],
+      DINING_RULE,
+      CATEGORIES,
+    );
+    expect(out.category).toEqual({ value: null, confidence: 0 });
+  });
+
+  // Spec §8.1.6 — rules FILL, they never overrule a grounded model category.
+  it('never overwrites a managed category, even when a rule matches the merchant', () => {
+    const [out] = enrichStatementRows(
+      [fieldsOf({ merchant: { value: RAW_UPI, confidence: 0.8 } })],
+      DINING_RULE,
+      CATEGORIES,
+    );
+    expect(out.category).toEqual({ value: 'Groceries', confidence: 0.7 });
+  });
+
+  it('replaces an unmanaged category only when a rule fires', () => {
+    const unmanaged = (merchant: string): StatementRowFields => ({
+      ...fieldsOf({ merchant: { value: merchant, confidence: 0.8 } }),
+      category: { value: 'Food', confidence: 0.4 },
+    });
+    const [ruled] = enrichStatementRows([unmanaged(RAW_UPI)], DINING_RULE, CATEGORIES);
+    expect(ruled.category).toEqual({ value: 'Dining', confidence: 1 });
+
+    const [unruled] = enrichStatementRows([unmanaged('Tesco')], DINING_RULE, CATEGORIES);
+    expect(unruled.category).toEqual({ value: 'Food', confidence: 0.4 });
+  });
+
+  it('a disabled rule fills nothing', () => {
+    const [out] = enrichStatementRows(
+      [
+        fieldsOf({
+          merchant: { value: RAW_UPI, confidence: 0.8 },
+          category: { value: null, confidence: 0 },
+        }),
+      ],
+      [rule('merchant contains swiggy', 'set category to Dining', false)],
+      CATEGORIES,
+    );
+    expect(out.category).toEqual({ value: null, confidence: 0 });
+  });
+
+  it('an unreadable merchant stays null and matches no rule', () => {
+    const [out] = enrichStatementRows(
+      [
+        fieldsOf({
+          merchant: { value: null, confidence: 0 },
+          category: { value: null, confidence: 0 },
+        }),
+      ],
+      DINING_RULE,
+      CATEGORIES,
+    );
+    expect(out.merchant).toEqual({ value: null, confidence: 0 });
+    expect(out.category).toEqual({ value: null, confidence: 0 });
+  });
+
+  // The cleaned merchant is what fingerprints are built from downstream —
+  // enrichment must precede the duplicate pass (pinned end-to-end in
+  // tests/statementResume.test.ts).
+  it('the enriched row fingerprints on the cleaned name', () => {
+    const [out] = enrichStatementRows(
+      [fieldsOf({ merchant: { value: RAW_UPI, confidence: 0.8 } })],
+      [],
+      CATEGORIES,
+    );
+    expect(statementRowFingerprint(out, 'Main Checking')).toBe(
+      txFingerprint('2026-03-04', 'Swiggy Limited', 41.2, 'Main Checking'),
+    );
   });
 });
 
