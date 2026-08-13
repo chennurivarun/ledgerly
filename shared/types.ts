@@ -249,6 +249,8 @@ export interface StatePayload {
   ruleSuggestions?: RuleSuggestion[];
   /** Mail-in feed inbox (sprint 8): newest first, capped at 100. */
   inboxEmails?: InboxEmail[];
+  /** Build id of the deployment serving this response (version-skew detection); absent on older servers. */
+  buildId?: string;
 }
 
 // ---------------------------------------------------------------------------
