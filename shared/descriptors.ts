@@ -81,5 +81,10 @@ export function cleanBankDescriptor(raw: string): string {
 
   const mixedCase = /\p{Ll}/u.test(survivor) && /\p{Lu}/u.test(survivor);
   if (mixedCase) return survivor;
+  // A lone short all-caps survivor is almost always an acronym merchant
+  // ("KFC", "HDFC", "IRCTC") — Title-Casing it manufactures a name nobody
+  // wrote. Multi-word survivors still Title-Case as a whole: mixing per-token
+  // exceptions ("Acme CORP Salary") reads worse than either extreme.
+  if (/^\p{Lu}{2,5}$/u.test(survivor)) return survivor;
   return survivor.split(' ').map(titleCaseWord).join(' ');
 }

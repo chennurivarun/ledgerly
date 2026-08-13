@@ -123,6 +123,16 @@ describe('cleanBankDescriptor — separators and casing', () => {
     expect(cleanBankDescriptor('UPI-McDonalds India')).toBe('McDonalds India');
   });
 
+  it('keeps a lone short all-caps survivor as written (acronym merchants)', () => {
+    expect(cleanBankDescriptor('UPI-KFC-kfc@icici-40293845')).toBe('KFC');
+    expect(cleanBankDescriptor('IRCTC')).toBe('IRCTC');
+  });
+
+  it('still Title-Cases multi-word and long all-caps survivors', () => {
+    expect(cleanBankDescriptor('UPI-ACME CORP SALARY-acme@sbi-11111')).toBe('Acme Corp Salary');
+    expect(cleanBankDescriptor('SWIGGY')).toBe('Swiggy');
+  });
+
   it('passes empty and whitespace-only input through trimmed', () => {
     expect(cleanBankDescriptor('')).toBe('');
     expect(cleanBankDescriptor('   ')).toBe('');
