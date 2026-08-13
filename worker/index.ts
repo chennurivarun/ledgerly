@@ -10,6 +10,7 @@ import {
   type StatePayload,
   type WipeResult,
 } from '../shared/types';
+import { BUILD_ID } from '../shared/version';
 import { computeBriefing, runScheduledBriefing, sendBriefingNow } from './briefings';
 import { deleteDocument, downloadDocument, uploadDocuments } from './documents';
 import { readDriveStatus, runDriveSync } from './drive';
@@ -113,6 +114,7 @@ app.get('/api/state', async (c) => {
     statements,
     ruleSuggestions,
     inboxEmails,
+    buildId: BUILD_ID,
   };
   return c.json(payload);
 });

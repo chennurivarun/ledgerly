@@ -2,6 +2,7 @@
 // mobile compact top bar + horizontally scrollable bottom nav reaching all tabs.
 // OWNERSHIP: this file is frozen scaffold — global modal CONTENT lives in
 // GlobalModals.tsx (Task 2); pages must not edit this file.
+import { useState } from 'react';
 import {
   ArrowLeftRight,
   CreditCard,
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useStore } from '../store';
+import { BUILD_ID, shouldOfferReload } from '../../shared/version';
 import { GlobalModals } from './GlobalModals';
 import { Button } from './ui';
 
@@ -144,6 +146,7 @@ export default function Layout() {
       </nav>
 
       <Toasts />
+      <UpdateBanner />
       <GlobalModals />
     </div>
   );
@@ -174,6 +177,46 @@ function Toasts() {
           </button>
         </div>
       ))}
+    </div>
+  );
+}
+
+// Version-skew banner (sprint 13, shared/version.ts): a tab that loaded
+// before a deploy is still running the old bundle against the new worker.
+// Non-blocking and dismissible only — see shared/version.ts for why this
+// NEVER reloads on its own. Positioned above the mobile bottom nav (z-30,
+// bottom-anchored) and below the Modal overlay (z-50) and Toasts (z-[60]).
+function UpdateBanner() {
+  const serverBuildId = useStore((s) => s.serverBuildId);
+  const [dismissedBuildId, setDismissedBuildId] = useState<string | null>(null);
+
+  if (!shouldOfferReload(BUILD_ID, serverBuildId, dismissedBuildId)) return null;
+
+  return (
+    <div
+      role="status"
+      className="fixed inset-x-4 z-40 mx-auto flex max-w-sm items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-sm shadow-lg bottom-[calc(5rem+env(safe-area-inset-bottom))] lg:inset-x-auto lg:right-6 lg:left-auto lg:bottom-6"
+    >
+      <span className="flex-1 font-medium text-ink">A new version of Ledgerly is available.</span>
+      <Button
+        size="sm"
+        onClick={() => {
+          // The ONLY reload in this codebase, and only from this user-initiated
+          // click — never auto-reload (see shared/version.ts header comment):
+          // an open review modal with in-progress edits must survive a deploy.
+          window.location.reload();
+        }}
+      >
+        Reload
+      </Button>
+      <button
+        type="button"
+        aria-label="Dismiss update notice"
+        onClick={() => setDismissedBuildId(serverBuildId)}
+        className="rounded-md p-0.5 text-muted hover:bg-canvas hover:text-ink"
+      >
+        <X className="size-4" aria-hidden />
+      </button>
     </div>
   );
 }
