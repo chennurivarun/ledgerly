@@ -79,6 +79,17 @@ export const SCHEMA_STATEMENTS = [
     key TEXT PRIMARY KEY,
     createdAt TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS merchant_profiles (
+    normalizedMerchant TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    kind TEXT,
+    category TEXT NOT NULL,
+    createdAt TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS merchant_question_dismissals (
+    normalizedMerchant TEXT PRIMARY KEY,
+    createdAt TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS inbox_emails (
     id TEXT PRIMARY KEY,
     messageId TEXT NOT NULL UNIQUE,

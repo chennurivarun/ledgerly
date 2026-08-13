@@ -247,6 +247,9 @@ export interface StatePayload {
   statements?: StatementExtraction[];
   /** Rule suggestions learned from category corrections (sprint 5). */
   ruleSuggestions?: RuleSuggestion[];
+  /** "Getting to know you" merchant questions (sprint 14): top-ranked first,
+   * capped at 3 — a drip, never a wall. */
+  merchantQuestions?: MerchantQuestion[];
   /** Mail-in feed inbox (sprint 8): newest first, capped at 100. */
   inboxEmails?: InboxEmail[];
 }
@@ -313,6 +316,45 @@ export interface RuleSuggestion {
   evidenceCount: number;
   /** ISO timestamp of the most recent agreeing correction. */
   lastSeen: string;
+}
+
+// ---------------------------------------------------------------------------
+// "Getting to know you" merchant questions (sprint 14). Sparse, high-value
+// questions — "who is this merchant?" — whose answers permanently teach the
+// app (a stored profile + a real rule). Deterministic, zero AI: candidates
+// come from repeated transactions the app demonstrably does not understand.
+// ---------------------------------------------------------------------------
+
+export type MerchantKind = 'person' | 'business';
+
+/** One question the Dashboard may ask. Computed, never stored — answering or
+ * dismissing is what writes anything. */
+export interface MerchantQuestion {
+  /** Stable key: the cleaned (cleanBankDescriptor), lowercased merchant. */
+  id: string;
+  /** Display name — the cleaned merchant as seen on the most recent transaction. */
+  merchant: string;
+  /** Transactions grouped under this merchant. */
+  txCount: number;
+  /** Sum of their amounts (positive magnitudes). */
+  total: number;
+  /** Date (YYYY-MM-DD) of the newest transaction in the group. */
+  mostRecent: string;
+  /** Heuristic default for the UI's Person/Business toggle — a HINT only,
+   * never stored without the user's answer. null = no opinion. */
+  suggestedKind: MerchantKind | null;
+}
+
+/** Body for POST /api/merchant-questions/answer. */
+export interface MerchantAnswerInput {
+  /** The question's display merchant. */
+  merchant: string;
+  kind: MerchantKind | null;
+  /** Optional friendly name; defaults to the display merchant. */
+  label?: string;
+  category: string;
+  /** Also recategorize this merchant's existing 'Needs review' transactions. */
+  applyToExisting: boolean;
 }
 
 /**
