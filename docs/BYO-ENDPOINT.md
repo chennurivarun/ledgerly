@@ -65,8 +65,36 @@ model you pick.
 | Capability | Custom endpoint | Notes |
 |---|---|---|
 | Receipt extraction — images (PNG/JPEG/WebP/GIF) | ✅ | Sent as a data-URI `image_url` part; nothing for the endpoint to fetch. |
-| Receipt extraction — PDFs | ❌ not yet | PDF ingestion is a per-vendor extension no two OpenAI-compatible servers agree on. Ledgerly refuses up front with a readable message; use Sarvam or Anthropic for PDF receipts for now. |
-| Statement reads (PDF) | ❌ not yet | Same reason. Sprint 16 lifts both by rendering pages to images in your browser and sending those. |
+| Receipt extraction — PDFs | ❌ not yet | PDF ingestion is a per-vendor extension no two OpenAI-compatible servers agree on. Ledgerly refuses up front with a readable message; use Sarvam or Anthropic for PDF receipts, or Read as statement for multi-page PDFs. |
+| Statement reads (PDF) | ✅ | Via the browser flow below — your browser extracts each page and the worker feeds them to your endpoint. Text-first, with a scanned-page image fallback. |
+
+## How statement reads work (the browser flow)
+
+A Cloudflare Worker cannot rasterize a PDF and OpenAI-compatible servers do
+not agree on PDF ingestion — so for statements, **your own browser does the
+page work**:
+
+1. You click **Read as statement** and confirm the preflight (pages, rounds,
+   and the honest cost line: Ledgerly adds nothing; your endpoint's pricing
+   applies — ₹0 on free endpoints).
+2. The browser downloads the PDF from your vault and walks it page by page
+   with pdf.js. A page with a real text layer is sent as **text** (more
+   accurate and much cheaper than vision); a scanned or text-poor page is
+   rendered to a JPEG and sent as an **image**.
+3. Pages go to the worker in rounds of up to 8. The worker — never the
+   browser — holds your endpoint key and makes the model calls: one text call
+   and/or one vision call per round. Pick a **vision-capable** model if your
+   statements are scans; a text-only model is fine for born-digital PDFs.
+4. When every round is done, the worker runs the same validation, merchant
+   cleanup, rule enrichment and duplicate pre-flagging every provider's rows
+   get, and the review table opens. Nothing is imported until you confirm
+   rows, exactly as always.
+
+Honesty notes: free-tier rate limits mean a long statement takes minutes (the
+row shows "Reading pages 9–16 of 23…" while it works, and the page stays
+usable). A round that fails twice is skipped and the result is marked
+**truncated** — a loud partial, never a silent hole. Closing the tab mid-read
+cancels the run; statements are capped at 100 pages per read.
 
 Requests go out with `temperature: 0` and **without** a structured-output
 field: `response_format` support varies wildly across servers (some reject it,

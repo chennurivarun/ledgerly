@@ -8,6 +8,7 @@
 import { cleanBankDescriptor } from '../shared/descriptors';
 import { txFingerprint } from '../shared/fingerprint';
 import {
+  CLIENT_STATEMENT_PAGES_PER_ROUND,
   MAX_FILE_BYTES,
   MAX_STATEMENT_ROWS,
   NEEDS_REVIEW,
@@ -17,6 +18,7 @@ import {
   type Settings,
   type StatementExtraction,
   type StatementJobStatus,
+  type StatementPagesRoundResult,
   type StatementPreflight,
   type StatementRow,
   type StatementRowStatus,
@@ -33,9 +35,13 @@ import {
   normalizeStatementRows,
   pollSarvamJobStatus,
   requireSarvamKey,
+  runStatementPagesRound,
+  selectProvider,
   selectStatementProvider,
   submitSarvamStatementJobs,
   toStatementEnvelopeRow,
+  validateRoundPages,
+  type CustomDeps,
   type SarvamDeps,
   type StatementRowFields,
   type StatementRun,
@@ -43,7 +49,7 @@ import {
 import { extractionInFlight, readDocumentRow } from './extractions';
 import { readEnabledRules } from './queries';
 import { applyRules } from './rules';
-import { readSarvamApiKey, readSettings } from './settingsStore';
+import { readCustomApiKey, readSarvamApiKey, readSettings } from './settingsStore';
 import {
   DEFAULT_ACCOUNT,
   existingFingerprints,
@@ -162,6 +168,13 @@ export function parseProviderState(raw: string | null | undefined): ProviderStat
     return null;
   }
   if (!isRecord(parsed) || parsed.v !== 1) return null;
+  // Pinned (sprint 16): a state carrying ANY `mode` marker is not a Sarvam
+  // resumable run — today that means the browser-pages flow's
+  // {mode:'client-pages'} claim, whose job the WORKER must never tick (there
+  // are no provider jobs to poll; the user's browser is doing the work). The
+  // field checks below would already reject it, but this rule is a contract,
+  // not a coincidence of shapes.
+  if (parsed.mode !== undefined) return null;
   if (!Array.isArray(parsed.jobs) || typeof parsed.submittedAt !== 'string') return null;
   if (typeof parsed.batchCount !== 'number' || !Number.isInteger(parsed.batchCount)) return null;
   if (parsed.batchCount < 1) return null;
@@ -216,12 +229,59 @@ const NO_ROWS_MESSAGE =
  * next tick. */
 const TICK_MAX_RESULT_FETCHES = 2;
 
+// ---------------------------------------------------------------------------
+// Client-pages state (sprint 16)
+//
+// The browser-pages flow parks a DIFFERENT providerState shape while a
+// browser is reading the statement: {v:1, mode:'client-pages', beganAt}.
+// There is nothing in it to resume — no provider jobs, no rows — because the
+// user's own browser holds the read in flight; the state exists so the claim
+// is visible (a second read attempt 409s) and so parseProviderState can
+// refuse it (the S12 tick path must never mistake a browser read for a
+// Sarvam run). Rows a browser submits are SUGGESTIONS that pass the same
+// never-guess normalization + review table as every provider — the
+// manual-entry trust model — and the custom API key never leaves the worker.
+// ---------------------------------------------------------------------------
+
+interface ClientPagesState {
+  v: 1;
+  mode: 'client-pages';
+  beganAt: string;
+}
+
+/** The one reader of a client-pages blob; anything else is null. */
+export function parseClientPagesState(raw: string | null | undefined): ClientPagesState | null {
+  if (typeof raw !== 'string') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || parsed.v !== 1 || parsed.mode !== 'client-pages') return null;
+  if (typeof parsed.beganAt !== 'string') return null;
+  return parsed as unknown as ClientPagesState;
+}
+
+/** POST /statement/extract while a browser holds the claim — same words as
+ * every other in-flight collision. */
+export const CUSTOM_STATEMENT_BROWSER_FLOW =
+  'This provider reads statements through the browser flow.';
+
+export const CLIENT_ABORT_MESSAGE = 'The read was cancelled in the browser.';
+
+const NO_CLIENT_READ_MESSAGE =
+  'No browser read is in progress for this statement. Start the read again.';
+
+const CLIENT_NO_ROWS_MESSAGE =
+  'No transactions could be read from this statement. Try again, or try a clearer copy.';
+
 /** The ONLY writer of a non-NULL providerState (and the explicit clear). The
  * Anthropic branch never calls it — pinned by tests. */
 async function writeProviderState(
   db: D1Database,
   documentId: string,
-  state: ProviderState | null,
+  state: ProviderState | ClientPagesState | null,
   now: string,
 ): Promise<void> {
   await db
@@ -445,18 +505,26 @@ export function enrichStatementRows(
 
 /**
  * The preflight numbers, kept pure so the math is directly testable. Batches:
- * Sarvam runs one job per 10 pages (its documented per-job ceiling); Anthropic
- * reads the whole PDF in one request. estimatedCost is the user's own saved
- * per-page rate × pages, rounded to 2dp — and null whenever no rate is saved
- * or the provider does not bill per page, because a guessed price is worse
- * than no price.
+ * Sarvam runs one job per 10 pages (its documented per-job ceiling); a custom
+ * endpoint reads browser-extracted pages in rounds of 8 (sprint 16);
+ * Anthropic reads the whole PDF in one request. estimatedCost is the user's
+ * own saved per-page rate × pages, rounded to 2dp — and null whenever no rate
+ * is saved or the provider does not bill per page (Anthropic bills per token;
+ * a custom endpoint's pricing is whatever the user's endpoint charges, which
+ * Ledgerly cannot honestly number), because a guessed price is worse than no
+ * price.
  */
 export function buildStatementPreflight(
   pages: number,
   provider: AiProvider,
   pricePerPage: number | null,
 ): StatementPreflight {
-  const batches = provider === 'sarvam' ? Math.ceil(pages / MAX_SARVAM_PAGES_PER_JOB) : 1;
+  const batches =
+    provider === 'sarvam'
+      ? Math.ceil(pages / MAX_SARVAM_PAGES_PER_JOB)
+      : provider === 'custom'
+        ? Math.ceil(pages / CLIENT_STATEMENT_PAGES_PER_ROUND)
+        : 1;
   const estimatedCost =
     provider === 'sarvam' && pricePerPage !== null
       ? Math.round(pages * pricePerPage * 100) / 100
@@ -485,15 +553,22 @@ export async function statementPreflight(
 
   const object = await env.BUCKET.get(doc.objectKey);
   if (!object) throw new ApiFail(404, 'The stored copy of that file is no longer available.');
-  const bytes = await object.arrayBuffer();
 
+  // The sprint-11 measured count answers without parsing the PDF again (the
+  // R2 existence check above still runs — a preflight must not promise a read
+  // of a file that is gone). Only unknown counts (pre-migration rows, or a
+  // PDF the upload path could not read) fall back to counting here.
   let pages: number;
-  try {
-    pages = await countPdfPages(bytes);
-  } catch (err) {
-    // pdfSplit's messages (unreadable / password-protected) are already the
-    // user-facing words; here the user has spent nothing, so it is a 400.
-    throw new ApiFail(400, err instanceof Error ? err.message : 'This PDF could not be read.');
+  if (typeof doc.pageCount === 'number' && Number.isInteger(doc.pageCount) && doc.pageCount > 0) {
+    pages = doc.pageCount;
+  } else {
+    try {
+      pages = await countPdfPages(await object.arrayBuffer());
+    } catch (err) {
+      // pdfSplit's messages (unreadable / password-protected) are already the
+      // user-facing words; here the user has spent nothing, so it is a 400.
+      throw new ApiFail(400, err instanceof Error ? err.message : 'This PDF could not be read.');
+    }
   }
 
   return buildStatementPreflight(pages, provider, settings.sarvamPricePerPage);
@@ -973,11 +1048,26 @@ export async function runStatementExtraction(
   if (current && current.status === 'pending' && current.providerState !== null) {
     const state = parseProviderState(current.providerState);
     if (state) return runStatementTick(env, settings, current, state, now, deps);
+    // A browser-pages claim (sprint 16) is NOT tickable — the user's browser
+    // holds the read, and the worker has nothing to advance. Inside the
+    // in-flight window this POST is a collision and 409s (pinned); once the
+    // window lapses the claim below reclaims, exactly like legacy pending.
+    if (
+      parseClientPagesState(current.providerState) &&
+      extractionInFlight(current.status, current.updatedAt, now)
+    ) {
+      throw new ApiFail(409, IN_FLIGHT_MESSAGE);
+    }
   }
 
   // Configuration problems are the user's to fix, so they are 400s and leave
   // no row behind; only an attempted-and-failed run is stored as `failed`.
   const { provider, model } = selectStatementProvider(settings);
+  // A fresh custom-provider run never starts here: statements on the custom
+  // endpoint are read via begin/round/finalize (the browser extracts the
+  // pages — this worker cannot rasterize a PDF). The UI never calls this
+  // route for custom; the 400 is for anyone driving the API directly.
+  if (provider === 'custom') throw new ApiFail(400, CUSTOM_STATEMENT_BROWSER_FLOW);
   assertStatementMime(doc.mimeType);
   if (doc.size > MAX_FILE_BYTES) {
     throw new ApiFail(413, 'That file is too large to send for extraction.');
@@ -1012,6 +1102,199 @@ export async function runStatementExtraction(
       now,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// The browser-pages flow (sprint 16): begin → round × N → finalize (or abort).
+//
+// The custom provider cannot read a PDF (worker/ai/providers.ts) and a Worker
+// cannot rasterize one, so the user's own browser does the page work — text
+// layer where the PDF has one, a rendered image where it doesn't — and posts
+// pages in rounds of ≤8. The worker owns everything else: the config gates,
+// the claim, the model calls (the custom key NEVER reaches the client), and
+// the one persistence pipeline every provider's rows go through at finalize.
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/documents/:id/statement/pages/begin — the statement gates for
+ * provider 'custom' (URL + model required, PDF mime), then the SAME claim
+ * every other run takes, with a client-pages providerState parked so a
+ * colliding read 409s and the S12 tick path knows to keep its hands off.
+ */
+export async function beginClientStatement(
+  env: Env,
+  documentId: string,
+): Promise<{ ok: true }> {
+  const doc = await readDocumentRow(env.DB, documentId);
+  const settings = await readSettings(env.DB);
+  const now = new Date().toISOString();
+
+  const { provider, model } = selectStatementProvider(settings);
+  if (provider !== 'custom') {
+    // Anthropic/Sarvam read the PDF themselves — their door is /extract.
+    throw new ApiFail(400, 'This provider reads statements directly — use Read as statement.');
+  }
+  assertStatementMime(doc.mimeType);
+
+  await claimStatement(env.DB, documentId, provider, model, now);
+  await writeProviderState(env.DB, documentId, { v: 1, mode: 'client-pages', beganAt: now }, now);
+  return { ok: true };
+}
+
+/** The pending client-pages claim, or the readable 409 for anything else. */
+async function requireClientClaim(
+  db: D1Database,
+  documentId: string,
+): Promise<{ job: JobRow; state: ClientPagesState }> {
+  const current = await db
+    .prepare(`SELECT ${JOB_SELECT_COLUMNS} FROM statement_extractions WHERE documentId = ?`)
+    .bind(documentId)
+    .first<JobRow>();
+  const state = current ? parseClientPagesState(current.providerState) : null;
+  if (!current || current.status !== 'pending' || !state) {
+    throw new ApiFail(409, NO_CLIENT_READ_MESSAGE);
+  }
+  return { job: current, state };
+}
+
+/**
+ * POST /api/documents/:id/statement/pages/round — ≤8 browser-extracted pages
+ * in, raw rows out. Text pages become ONE text-model call, image pages ONE
+ * vision call. NOTHING is persisted (finalize owns that); the only write is a
+ * re-stamp of the claim so an actively-read statement stays visibly in
+ * flight. Model and config failures are readable 400s and the round is
+ * retryable client-side — a retry can never double rows because rows only
+ * exist in the response.
+ */
+export async function clientStatementRound(
+  env: Env,
+  documentId: string,
+  body: unknown,
+  deps: CustomDeps = {},
+): Promise<StatementPagesRoundResult> {
+  await readDocumentRow(env.DB, documentId);
+  const { state } = await requireClientClaim(env.DB, documentId);
+  const pages = validateRoundPages(body);
+
+  const settings = await readSettings(env.DB);
+  // The custom config gates verbatim (URL + model, same messages), whatever
+  // aiProvider currently says: the claim was taken as 'custom', and a mid-run
+  // provider switch must not strand a read whose config still exists — the
+  // S12 "a paid run still finishes" ruling, applied to the user's own time.
+  const { model } = selectProvider({ ...settings, aiProvider: 'custom' });
+  const apiKey = await readCustomApiKey(env.DB);
+
+  // Keep the claim visibly alive while rounds arrive — a slow free-tier read
+  // must not look abandoned to a colliding begin/extract.
+  await writeProviderState(env.DB, documentId, state, new Date().toISOString());
+
+  try {
+    return await runStatementPagesRound(
+      { baseUrl: settings.customBaseUrl, apiKey, model },
+      pages,
+      settings.categories,
+      deps,
+    );
+  } catch (err) {
+    if (err instanceof ApiFail) throw err;
+    // runCustomChat's taxonomy is already user-facing words with the
+    // provider body dropped; 400 keeps the round retryable client-side.
+    throw new ApiFail(
+      400,
+      err instanceof Error ? clip(err.message) : 'Your custom endpoint could not read these pages.',
+    );
+  }
+}
+
+/**
+ * POST /api/documents/:id/statement/pages/finalize — {rows, truncated} in,
+ * the settled job out, through the EXISTING pipeline exactly: normalize cap →
+ * enrichment (cleaned merchants + rule-filled categories) → confirmed-
+ * fingerprint exclusion → duplicate pre-flag → persistStatementRun semantics
+ * (suggested/partial per truncated‖capped, zero readable rows → failed). The
+ * rows arrive from the user's own browser and get exactly as much trust as
+ * any model's output — none.
+ */
+export async function finalizeClientStatement(
+  env: Env,
+  documentId: string,
+  body: unknown,
+): Promise<StatementExtraction> {
+  await readDocumentRow(env.DB, documentId);
+  const { job: current } = await requireClientClaim(env.DB, documentId);
+
+  if (!isRecord(body) || !Array.isArray(body.rows)) {
+    throw new ApiFail(400, 'Send the rows this read produced.');
+  }
+  if (typeof body.truncated !== 'boolean') {
+    throw new ApiFail(400, 'Say whether the read was truncated (true or false).');
+  }
+  const rows = body.rows;
+  const truncated = body.truncated;
+
+  const settings = await readSettings(env.DB);
+  const now = new Date().toISOString();
+
+  // Clearing state first makes a crash mid-finalize land in the legacy
+  // 'pending without state' shape, which the existing in-flight window
+  // already knows how to reclaim (the tick finalize's exact discipline).
+  await writeProviderState(env.DB, documentId, null, now);
+
+  if (rows.length === 0) {
+    // Every round failed, or every page was unreadable — an honest failure,
+    // never "0 proposed".
+    return await saveFailedJob(
+      env,
+      documentId,
+      current.provider,
+      current.model,
+      CLIENT_NO_ROWS_MESSAGE,
+      now,
+    );
+  }
+
+  try {
+    return await persistStatementRun(
+      env,
+      documentId,
+      settings,
+      { rows, truncated },
+      current.provider,
+      current.model,
+      now,
+    );
+  } catch (err) {
+    if (err instanceof ApiFail) throw err;
+    return await saveFailedJob(
+      env,
+      documentId,
+      current.provider,
+      current.model,
+      err instanceof Error ? err.message : 'Statement extraction failed.',
+      now,
+    );
+  }
+}
+
+/**
+ * POST /api/documents/:id/statement/pages/abort — best-effort and idempotent:
+ * a pending browser read settles to 'failed' with the pinned cancellation
+ * message and its claim cleared; anything else (no job, a settled job, a
+ * Sarvam resumable run) is left exactly alone.
+ */
+export async function abortClientStatement(env: Env, documentId: string): Promise<{ ok: true }> {
+  await readDocumentRow(env.DB, documentId);
+  const current = await env.DB
+    .prepare(`SELECT ${JOB_SELECT_COLUMNS} FROM statement_extractions WHERE documentId = ?`)
+    .bind(documentId)
+    .first<JobRow>();
+  if (!current || current.status !== 'pending' || !parseClientPagesState(current.providerState)) {
+    return { ok: true };
+  }
+  const now = new Date().toISOString();
+  await writeProviderState(env.DB, documentId, null, now);
+  await saveFailedJob(env, documentId, current.provider, current.model, CLIENT_ABORT_MESSAGE, now);
+  return { ok: true };
 }
 
 /**

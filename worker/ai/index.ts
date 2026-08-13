@@ -38,6 +38,7 @@ export {
   type CustomDeps,
   type CustomEndpointConfig,
 } from './custom';
+export { runStatementPagesRound, validateRoundPages } from './statementPages';
 export {
   emptyFields,
   emptyStatementRow,

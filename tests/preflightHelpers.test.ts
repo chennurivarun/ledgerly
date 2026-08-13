@@ -19,8 +19,9 @@ describe('providerCanReadPdfStatements', () => {
     'workers-ai': false,
     anthropic: true,
     sarvam: true,
-    // Images-only until S16 renders statement pages to images client-side.
-    custom: false,
+    // S16: statements read via the browser-pages flow (text-first, rendered
+    // image fallback) — the custom endpoint is statement-capable now.
+    custom: true,
   };
 
   for (const [provider, capable] of Object.entries(expected) as [AiProvider, boolean][]) {
@@ -109,6 +110,20 @@ describe('preflightCostLine', () => {
     // "your saved Sarvam rate × pages" under Anthropic would be a lie.
     expect(preflightCostLine({ provider: 'anthropic', estimatedCost: 12.5 })).toBe(
       'Anthropic bills per token — typically a few cents per statement.',
+    );
+  });
+
+  it('custom: the browser-flow copy — Ledgerly adds no cost, the endpoint owns pricing', () => {
+    expect(preflightCostLine({ provider: 'custom', estimatedCost: null })).toBe(
+      "Read in your browser via your custom endpoint — Ledgerly adds no cost; your endpoint's own limits and pricing apply.",
+    );
+  });
+
+  it('custom never gets the per-page estimate line, even if a cost value sneaks through', () => {
+    // Same rule as Anthropic: per-page arithmetic doesn't describe what the
+    // user's own endpoint bills, and Ledgerly cannot honestly number it.
+    expect(preflightCostLine({ provider: 'custom', estimatedCost: 12.5 })).toBe(
+      "Read in your browser via your custom endpoint — Ledgerly adds no cost; your endpoint's own limits and pricing apply.",
     );
   });
 

@@ -99,12 +99,13 @@ export function selectProvider(settings: Settings): ProviderChoice {
  * A custom OpenAI-compatible endpoint receives page IMAGES only (sprint 15):
  * image_url content parts are the one vision input the OpenAI chat shape
  * carries portably, while PDF ingestion is a per-vendor extension no two
- * servers agree on. S16 (browser-rendered page images) lifts this by turning
- * PDFs into images client-side; until then the refusal below is honest about
- * where PDFs must go.
+ * servers agree on. Since sprint 16 STATEMENTS route around this — the
+ * browser extracts each page (text or rendered image) and the worker feeds
+ * those to the endpoint — so this refusal now covers only the single-receipt
+ * path, and points multi-page PDFs at the door that works.
  */
 export const CUSTOM_NO_PDF =
-  "Your custom endpoint receives page images; PDFs aren't supported on it yet — statements and PDF receipts need Sarvam or Anthropic for now.";
+  "Your custom endpoint receives page images, so PDF receipts can't be read on it — use the Anthropic or Sarvam provider for PDF receipts, or read multi-page PDFs with Read as statement.";
 
 /**
  * Anthropic reads PDFs natively; Sarvam Doc AI reads PDFs plus its documented
@@ -152,22 +153,24 @@ export const WORKERS_AI_NO_PDF =
   "Reading PDF statements needs the Anthropic or Sarvam provider — Workers AI models can't read PDFs yet.";
 
 /**
- * Statement extraction is BYOK-only: Anthropic (sprint 4) or Sarvam (sprint
- * 10). The privacy-first default cannot do the job at all here (providers.ts
- * has refused PDFs to Workers AI since sprint 3), so rather than pretend, the
- * endpoint names the capable providers and the reason.
+ * Statement-capable providers: Anthropic (sprint 4) and Sarvam (sprint 10)
+ * read the PDF themselves; a custom endpoint (sprint 16) reads statements
+ * through the browser-pages flow — the client extracts each page and the
+ * worker feeds them to the endpoint, so its URL+model gates apply exactly as
+ * they do for receipts. The privacy-first default cannot do the job at all
+ * here (providers.ts has refused PDFs to Workers AI since sprint 3), so
+ * rather than pretend, the endpoint names the reason.
  */
 export function selectStatementProvider(settings: Settings): ProviderChoice {
   if (settings.aiProvider === 'workers-ai') throw new ApiFail(400, WORKERS_AI_NO_PDF);
-  // Custom is refused BEFORE the config gates: "set the base URL" would send
-  // the user configuring an endpoint that still couldn't read the statement.
-  // The honest answer is that statements need a PDF-capable provider — S16
-  // (browser-rendered page images) is what lifts this.
-  if (settings.aiProvider === 'custom') throw new ApiFail(400, CUSTOM_NO_PDF);
-  // 'off' and a missing key are the same configuration problems as receipt
-  // extraction, and get the same messages.
+  // 'off' and a missing key/URL/model are the same configuration problems as
+  // receipt extraction, and get the same messages.
   const choice = selectProvider(settings);
-  if (choice.provider !== 'anthropic' && choice.provider !== 'sarvam') {
+  if (
+    choice.provider !== 'anthropic' &&
+    choice.provider !== 'sarvam' &&
+    choice.provider !== 'custom'
+  ) {
     throw new ApiFail(400, WORKERS_AI_NO_PDF);
   }
   return choice;

@@ -300,18 +300,28 @@ describe('mime gating — images only for custom', () => {
     });
   }
 
-  it('PDFs are refused with the pinned honest copy', () => {
+  it('PDFs are refused with the pinned honest copy (receipt path only since S16)', () => {
     expect(supportsMime('custom', 'application/pdf')).toBe(false);
     expect(() => assertMimeSupported('custom', 'application/pdf')).toThrow(CUSTOM_NO_PDF);
+    // The copy points multi-page PDFs at the door that DOES work now.
+    expect(CUSTOM_NO_PDF).toMatch(/Read as statement/);
   });
 
-  it('statements refuse custom outright with the same copy — even a fully configured one', () => {
-    expect(() => selectStatementProvider(customReady())).toThrow(CUSTOM_NO_PDF);
-    // And BEFORE the config gates: an unconfigured custom gets the capability
-    // answer, not a "set the base URL" that couldn't lead anywhere.
+  it('statements ACCEPT custom since S16 (the browser-pages flow), with its config gates', () => {
+    expect(selectStatementProvider(customReady())).toEqual({
+      provider: 'custom',
+      model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+    });
+    // An unconfigured custom gets the same actionable config 400s as
+    // receipts — "set the base URL" now leads somewhere real.
     expect(() => selectStatementProvider(settingsWith({ aiProvider: 'custom' }))).toThrow(
-      CUSTOM_NO_PDF,
+      /endpoint base URL in Settings/i,
     );
+    expect(() =>
+      selectStatementProvider(
+        settingsWith({ aiProvider: 'custom', customBaseUrl: 'https://x.dev/v1' }),
+      ),
+    ).toThrow('Set the model id in Settings → AI.');
   });
 });
 
@@ -342,13 +352,10 @@ describe('pdfStatementsBlockedCopy', () => {
     expect(pdfStatementsBlockedCopy('workers-ai')).toMatch(/Workers AI/);
   });
 
-  it('matches the server refusal verbatim for custom', () => {
-    expect(pdfStatementsBlockedCopy('custom')).toBe(CUSTOM_NO_PDF);
-  });
-
-  it('null for the providers that can read statements', () => {
+  it('null for the providers that can read statements — custom included since S16', () => {
     expect(pdfStatementsBlockedCopy('anthropic')).toBeNull();
     expect(pdfStatementsBlockedCopy('sarvam')).toBeNull();
+    expect(pdfStatementsBlockedCopy('custom')).toBeNull();
   });
 });
 

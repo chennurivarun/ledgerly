@@ -42,8 +42,12 @@ import { readDocuments, readRules, readTags, readTransactions } from './queries'
 import { ensureSchema } from './schema';
 import { readSettings, writeSettings } from './settingsStore';
 import {
+  abortClientStatement,
+  beginClientStatement,
+  clientStatementRound,
   confirmStatementRows,
   dismissStatement,
+  finalizeClientStatement,
   readStatements,
   runStatementExtraction,
   statementPreflight,
@@ -400,6 +404,27 @@ app.get('/api/documents/:id/statement/preflight', async (c) =>
 
 app.post('/api/documents/:id/statement/extract', async (c) =>
   c.json(await runStatementExtraction(c.env, c.req.param('id'))),
+);
+
+// The browser-pages flow (sprint 16): the client's own browser extracts each
+// PDF page (text layer, or a rendered image) and posts them in short rounds;
+// the worker owns the model calls and every persistence step. The custom API
+// key never reaches the client, and nothing is inserted here — rows ride the
+// same review gate as every provider.
+app.post('/api/documents/:id/statement/pages/begin', async (c) =>
+  c.json(await beginClientStatement(c.env, c.req.param('id'))),
+);
+
+app.post('/api/documents/:id/statement/pages/round', async (c) =>
+  c.json(await clientStatementRound(c.env, c.req.param('id'), await readJson(c))),
+);
+
+app.post('/api/documents/:id/statement/pages/finalize', async (c) =>
+  c.json(await finalizeClientStatement(c.env, c.req.param('id'), await readJson(c))),
+);
+
+app.post('/api/documents/:id/statement/pages/abort', async (c) =>
+  c.json(await abortClientStatement(c.env, c.req.param('id'))),
 );
 
 app.post('/api/documents/:id/statement/confirm', async (c) =>

@@ -15,6 +15,9 @@ import {
   type RuleSuggestionActionInput,
   type StatementConfirmInput,
   type StatementExtraction,
+  type StatementPagesFinalizeInput,
+  type StatementPagesRoundInput,
+  type StatementPagesRoundResult,
   type StatementPreflight,
   type StatePayload,
   type Transaction,
@@ -125,6 +128,34 @@ export const api = {
   extractStatement: (id: string) =>
     request<StatementExtraction>(
       `/api/documents/${encodeURIComponent(id)}/statement/extract`,
+      { method: 'POST' },
+    ),
+
+  /** Claim a statement for the browser-pages read (custom provider, S16). */
+  beginStatementPages: (id: string) =>
+    request<{ ok: true }>(
+      `/api/documents/${encodeURIComponent(id)}/statement/pages/begin`,
+      { method: 'POST' },
+    ),
+
+  /** One round of browser-extracted pages → raw rows. Persists nothing. */
+  statementPagesRound: (id: string, input: StatementPagesRoundInput) =>
+    request<StatementPagesRoundResult>(
+      `/api/documents/${encodeURIComponent(id)}/statement/pages/round`,
+      { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(input) },
+    ),
+
+  /** Settle a browser read through the ordinary persistence pipeline. */
+  finalizeStatementPages: (id: string, input: StatementPagesFinalizeInput) =>
+    request<StatementExtraction>(
+      `/api/documents/${encodeURIComponent(id)}/statement/pages/finalize`,
+      { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(input) },
+    ),
+
+  /** Best-effort cancel of a browser read (unload/cancel). */
+  abortStatementPages: (id: string) =>
+    request<{ ok: true }>(
+      `/api/documents/${encodeURIComponent(id)}/statement/pages/abort`,
       { method: 'POST' },
     ),
 

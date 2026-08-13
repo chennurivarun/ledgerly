@@ -48,6 +48,8 @@ export interface DocRow {
   mimeType: string;
   objectKey: string;
   size: number;
+  /** Sprint-11 measured page count; null/undefined = unknown (never guessed). */
+  pageCount?: number | null;
 }
 
 /** A corrupt `fields` blob degrades to all-unknown rather than breaking /api/state. */
@@ -108,7 +110,7 @@ export async function readExtractions(
 /** Shared with the statement pipeline — same 404, same words. */
 export async function readDocumentRow(db: D1Database, id: string): Promise<DocRow> {
   const row = await db
-    .prepare('SELECT id, mimeType, objectKey, size FROM documents WHERE id = ?')
+    .prepare('SELECT id, mimeType, objectKey, size, pageCount FROM documents WHERE id = ?')
     .bind(id)
     .first<DocRow>();
   if (!row) throw new ApiFail(404, 'That document no longer exists.');
