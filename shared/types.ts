@@ -147,6 +147,13 @@ export interface Settings {
   aiKeySet: boolean;
   /** Whether a Sarvam API key is stored. Write-only, NEVER echoed. */
   sarvamKeySet: boolean;
+  /** Base URL of a user-configured OpenAI-compatible endpoint (sprint 15),
+   * e.g. 'https://integrate.api.nvidia.com/v1' or a local Ollama server.
+   * Stored normalized (no trailing slash); '' = not configured. */
+  customBaseUrl: string;
+  /** Whether a custom-endpoint API key is stored. Write-only, NEVER echoed.
+   * The key itself is OPTIONAL — keyless servers (local Ollama) are valid. */
+  customKeySet: boolean;
   /** User-entered Sarvam per-page price (their dashboard rate) for honest
    * cost estimates; null = no estimate shown, never a guessed price. */
   sarvamPricePerPage: number | null;
@@ -169,7 +176,7 @@ export interface Settings {
   emailAllowedSenders: string[];
 }
 
-export type AiProvider = 'off' | 'workers-ai' | 'anthropic' | 'sarvam';
+export type AiProvider = 'off' | 'workers-ai' | 'anthropic' | 'sarvam' | 'custom';
 
 export type BriefingCadence = 'daily' | 'weekly';
 
@@ -218,6 +225,8 @@ export function defaultSettings(): Settings {
     aiModel: null,
     aiKeySet: false,
     sarvamKeySet: false,
+    customBaseUrl: '',
+    customKeySet: false,
     sarvamPricePerPage: null,
     briefingsEnabled: false,
     briefingCadence: 'weekly',
@@ -534,6 +543,11 @@ export interface PreferencesUpdate {
   /** Write-only Sarvam key; null clears (aiApiKey semantics). */
   sarvamApiKey?: string | null;
   sarvamPricePerPage?: number | null;
+  /** Custom endpoint base URL; '' clears. Validated + normalized server-side. */
+  customBaseUrl?: string;
+  /** Write-only custom-endpoint key; null clears (aiApiKey semantics).
+   * Optional even when the provider is active — keyless servers exist. */
+  customApiKey?: string | null;
   briefingsEnabled?: boolean;
   briefingCadence?: BriefingCadence;
   /** E.164 digits without '+', or '' to clear. */

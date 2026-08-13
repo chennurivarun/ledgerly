@@ -23,7 +23,9 @@ import {
   receiptExtractOffered,
 } from '../components/ai/extractionHelpers';
 import {
+  customMissingConfig,
   missingKeyProvider,
+  pdfStatementsBlockedCopy,
   preflightCostLine,
   preflightSummary,
   providerCanReadPdfStatements,
@@ -143,6 +145,8 @@ export default function Documents() {
   const aiProvider = useStore((s) => s.settings.aiProvider);
   const aiKeySet = useStore((s) => s.settings.aiKeySet);
   const sarvamKeySet = useStore((s) => s.settings.sarvamKeySet);
+  const customBaseUrl = useStore((s) => s.settings.customBaseUrl);
+  const aiModel = useStore((s) => s.settings.aiModel);
   const emailFeedEnabled = useStore((s) => s.settings.emailFeedEnabled);
   const uploadDocuments = useStore((s) => s.uploadDocuments);
   const extractDocument = useStore((s) => s.extractDocument);
@@ -194,9 +198,12 @@ export default function Documents() {
   // A BYOK provider (Anthropic or Sarvam) without its stored key can't
   // actually extract anything — treat it as not-ready rather than offering a
   // button that will just fail. The helper names which key is missing so the
-  // banner below can say so.
+  // banner below can say so. The custom endpoint has its own readiness rule
+  // (base URL + model id; NO key required — keyless servers are valid), with
+  // its own helper naming what's missing.
   const missingKey = missingKeyProvider(aiProvider, aiKeySet, sarvamKeySet);
-  const aiReady = aiOn && missingKey === null;
+  const customMissing = customMissingConfig(aiProvider, customBaseUrl, aiModel);
+  const aiReady = aiOn && missingKey === null && customMissing === null;
 
   async function handleExtract(doc: DocumentMeta) {
     setRunning({ id: doc.id, kind: 'extract' });
@@ -588,15 +595,28 @@ export default function Documents() {
           </Link>
         </div>
       )}
-      {aiReady && !providerCanReadPdfStatements(aiProvider) && documents.some((d) => d.mimeType === 'application/pdf') && (
-        // Shown once for the whole vault (same convention as the two
-        // banners above), not per row — every PDF's "Read as statement"
-        // button is disabled for the same reason, so repeating it on each
-        // row would just be noise. With aiReady true this only ever fires
-        // for Workers AI, so naming it stays honest.
+      {aiOn && customMissing !== null && (
+        // Custom endpoint selected but not configured enough to call — same
+        // once-per-vault convention, naming exactly what's missing (base
+        // URL, model id, or both; never the key — that one is optional).
         <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">
           <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
-          <span>PDF statements need the Anthropic or Sarvam provider — Workers AI can&apos;t read them.</span>
+          <span>Add the {customMissing} in Settings to start extracting.</span>
+          <Link to="/settings" className="font-medium text-accent hover:underline">
+            Go to Settings
+          </Link>
+        </div>
+      )}
+      {aiReady && !providerCanReadPdfStatements(aiProvider) && documents.some((d) => d.mimeType === 'application/pdf') && (
+        // Shown once for the whole vault (same convention as the banners
+        // above), not per row — every PDF's "Read as statement" button is
+        // disabled for the same reason, so repeating it on each row would
+        // just be noise. With aiReady true this fires for Workers AI or a
+        // custom endpoint; the helper picks the copy that names the actual
+        // provider, so it can never blame the wrong one.
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">
+          <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
+          <span>{pdfStatementsBlockedCopy(aiProvider)}</span>
           <Link to="/settings" className="font-medium text-accent hover:underline">
             Switch in Settings
           </Link>

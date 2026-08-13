@@ -2,10 +2,18 @@
 // get validated fields or a readable Error — never raw model output, never an
 // inserted transaction (VISION.md principle 2: AI suggests, it never writes).
 import type { DocumentMeta, Settings } from '../../shared/types';
-import { readAiApiKey, readSarvamApiKey } from '../settingsStore';
+import { readAiApiKey, readCustomApiKey, readSarvamApiKey } from '../settingsStore';
 import { runAnthropic } from './anthropic';
+import { runCustomReceipt } from './custom';
 import { normalizeExtraction, type ExtractionFields } from './normalize';
-import { assertMimeSupported, assertStatementMime, selectProvider, selectStatementProvider } from './providers';
+import {
+  assertMimeSupported,
+  assertStatementMime,
+  canonicalMime,
+  selectProvider,
+  selectStatementProvider,
+  toBase64,
+} from './providers';
 import { runSarvamReceipt } from './sarvam';
 import { runAnthropicStatement, type StatementRun } from './statement';
 import { runWorkersAi } from './workersAi';
@@ -14,6 +22,7 @@ export {
   ANTHROPIC_DEFAULT_MODEL,
   assertMimeSupported,
   assertStatementMime,
+  CUSTOM_NO_PDF,
   SARVAM_DEFAULT_MODEL,
   selectProvider,
   selectStatementProvider,
@@ -21,6 +30,14 @@ export {
   WORKERS_AI_DEFAULT_MODEL,
   type ProviderChoice,
 } from './providers';
+export {
+  runCustomChat,
+  runCustomReceipt,
+  visionMessages,
+  type ChatMessage,
+  type CustomDeps,
+  type CustomEndpointConfig,
+} from './custom';
 export {
   emptyFields,
   emptyStatementRow,
@@ -84,6 +101,17 @@ export async function extractFromDocument(
     raw = await runAnthropic(apiKey, model, doc.mimeType, bytes, categories);
   } else if (provider === 'sarvam') {
     raw = await runSarvamReceipt(await requireSarvamKey(env), bytes, doc.mimeType, categories);
+  } else if (provider === 'custom') {
+    // A missing key is a VALID state here (keyless local servers) — the one
+    // provider where "no key stored" does not mean misconfigured. The image
+    // travels as a data: URI so the endpoint never has to fetch anything.
+    const apiKey = await readCustomApiKey(env.DB);
+    const imageDataUrl = `data:${canonicalMime(doc.mimeType)};base64,${toBase64(bytes)}`;
+    raw = await runCustomReceipt(
+      { baseUrl: settings.customBaseUrl, apiKey, model },
+      imageDataUrl,
+      categories,
+    );
   } else {
     raw = await runWorkersAi(env, model, doc.mimeType, bytes, categories);
   }

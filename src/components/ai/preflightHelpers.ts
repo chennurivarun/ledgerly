@@ -21,7 +21,9 @@ export function providerCanReadPdfStatements(provider: AiProvider): boolean {
  * Which BYOK provider is selected but missing its stored key — the display
  * name (used verbatim in the "add your key" banner), or null when the active
  * provider is ready. Only the ACTIVE provider's key matters: a stored Sarvam
- * key doesn't make Anthropic ready, and vice versa.
+ * key doesn't make Anthropic ready, and vice versa. The custom provider is
+ * deliberately absent — its key is optional (keyless servers are valid), so
+ * a missing key never makes it not-ready; see customMissingConfig.
  */
 export function missingKeyProvider(
   provider: AiProvider,
@@ -30,6 +32,46 @@ export function missingKeyProvider(
 ): 'Anthropic' | 'Sarvam' | null {
   if (provider === 'anthropic' && !aiKeySet) return 'Anthropic';
   if (provider === 'sarvam' && !sarvamKeySet) return 'Sarvam';
+  return null;
+}
+
+/**
+ * What the custom endpoint still needs before it can extract — a phrase
+ * naming exactly what's missing (used verbatim in "Add the … in Settings"),
+ * or null when it's ready (or when another provider is active). Ready means
+ * base URL AND model id: the key is NOT required — a keyless local server
+ * with a URL and a model is fully ready. Mirrors the server's selectProvider
+ * gates (worker/ai/providers.ts) so the banner and the 400s agree.
+ */
+export function customMissingConfig(
+  provider: AiProvider,
+  customBaseUrl: string,
+  aiModel: string | null,
+): string | null {
+  if (provider !== 'custom') return null;
+  const needsUrl = customBaseUrl.trim() === '';
+  const needsModel = (aiModel ?? '').trim() === '';
+  if (needsUrl && needsModel) return 'endpoint base URL and model id';
+  if (needsUrl) return 'endpoint base URL';
+  if (needsModel) return 'model id';
+  return null;
+}
+
+/**
+ * Why the active, otherwise-ready provider cannot read PDF statements — the
+ * page-level banner copy, or null for the providers that can. Single source
+ * for the Documents banner so it can never claim "Workers AI can't read
+ * them" while a custom endpoint is what's actually selected. The custom copy
+ * matches the server's refusal (CUSTOM_NO_PDF, worker/ai/providers.ts)
+ * verbatim so the banner and the 400 say the same thing.
+ */
+export function pdfStatementsBlockedCopy(provider: AiProvider): string | null {
+  if (provider === 'workers-ai') {
+    return "PDF statements need the Anthropic or Sarvam provider — Workers AI can't read them.";
+  }
+  if (provider === 'custom') {
+    return "Your custom endpoint receives page images; PDFs aren't supported on it yet — statements and PDF receipts need Sarvam or Anthropic for now.";
+  }
   return null;
 }
 
