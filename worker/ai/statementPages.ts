@@ -16,7 +16,7 @@ import {
 } from '../../shared/types';
 import { ApiFail, isRecord } from '../util';
 import {
-  runCustomChat,
+  runCustomChatDetailed,
   UNREADABLE_RESPONSE,
   visionMessages,
   type ChatMessage,
@@ -191,11 +191,22 @@ export async function runStatementPagesRound(
 
   const rows: unknown[] = [];
   let truncated = false;
+  let lastFinish: string | null = null;
   for (const group of groups) {
-    const answer = await runCustomChat(cfg, group.build(group.pages, categories), deps);
-    const read = rowsFromAnswer(answer);
+    const answer = await runCustomChatDetailed(cfg, group.build(group.pages, categories), deps);
+    lastFinish = answer.finishReason;
+    const read = rowsFromAnswer(answer.text);
     rows.push(...read.rows);
     if (read.salvaged) truncated = true;
   }
-  return { rows, truncated };
+  // A zero-row round explains itself with structural facts only — the finish
+  // reason is a protocol token, never model prose (live incident 2026-08-13:
+  // two consecutive all-empty reads were undiagnosable from the outside).
+  const diagnostic =
+    rows.length === 0
+      ? `The model answered but no transaction rows could be read from it${
+          lastFinish ? ` (finish_reason: ${lastFinish})` : ''
+        }.`
+      : null;
+  return { rows, truncated, diagnostic };
 }

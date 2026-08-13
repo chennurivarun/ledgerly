@@ -21,6 +21,7 @@ import {
   STATEMENT_PAGE_TEXT_MAX_CHARS,
   type StatementExtraction,
   type StatementPageInput,
+  type StatementPagesRoundResult,
 } from '../../../shared/types';
 
 // ---------------------------------------------------------------------------
@@ -266,7 +267,7 @@ async function roundWithRetry(
   pages: StatementPageInput[],
   token: CancelToken,
   runId: string,
-): Promise<{ rows: unknown[]; truncated: boolean }> {
+): Promise<StatementPagesRoundResult> {
   try {
     return await api.statementPagesRound(documentId, { pages, runId });
   } catch {
@@ -310,6 +311,7 @@ export async function runClientStatementRead(
 
     const rows: unknown[] = [];
     let truncated = extracted.truncated;
+    let lastDiagnostic: string | undefined;
     for (const round of chunkPages(extracted.pages)) {
       checkCancelled(token, documentId, runId);
       onProgress(
@@ -323,17 +325,25 @@ export async function runClientStatementRead(
         const out = await roundWithRetry(documentId, round, token, runId);
         rows.push(...out.rows);
         if (out.truncated) truncated = true;
+        if (out.diagnostic) lastDiagnostic = out.diagnostic;
       } catch (err) {
         if (err instanceof ClientReadCancelled) throw err;
         // This round's pages are skipped — the read continues and finalize
-        // reports the hole loudly instead of hiding it.
+        // reports the hole loudly instead of hiding it. The failure copy is
+        // our own taxonomy string — safe to surface as the diagnosis.
+        if (err instanceof Error && err.message) lastDiagnostic = err.message;
         truncated = true;
       }
     }
 
     checkCancelled(token, documentId, runId);
     onProgress('Finishing…');
-    return await api.finalizeStatementPages(documentId, { rows, truncated, runId });
+    return await api.finalizeStatementPages(documentId, {
+      rows,
+      truncated,
+      runId,
+      diagnostic: rows.length === 0 ? lastDiagnostic : undefined,
+    });
   } catch (err) {
     if (!(err instanceof ClientReadCancelled)) {
       // The claim must not linger behind a read that died before finalize.

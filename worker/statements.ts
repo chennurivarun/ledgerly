@@ -1272,13 +1272,19 @@ export async function finalizeClientStatement(
 
   if (rows.length === 0) {
     // Every round failed, or every page was unreadable — an honest failure,
-    // never "0 proposed".
+    // never "0 proposed". The client may attach a structural diagnosis (our
+    // own taxonomy strings / finish_reason tokens, single line, clipped) so
+    // an all-empty read finally says WHY (live incident 2026-08-13).
+    const diagnostic =
+      isRecord(body) && typeof body.diagnostic === 'string' && body.diagnostic.trim() !== ''
+        ? clip(body.diagnostic.replace(/\s+/g, ' ').trim())
+        : null;
     return await saveFailedJob(
       env,
       documentId,
       current.provider,
       current.model,
-      CLIENT_NO_ROWS_MESSAGE,
+      diagnostic ? `${CLIENT_NO_ROWS_MESSAGE} (${diagnostic})` : CLIENT_NO_ROWS_MESSAGE,
       now,
     );
   }

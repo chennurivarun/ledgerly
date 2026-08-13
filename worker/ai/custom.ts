@@ -131,7 +131,24 @@ function readCompletionText(body: unknown): string | null {
   // layer downstream treats every model answer as suspect anyway.
   const reasoning = first.message.reasoning_content;
   if (typeof reasoning === 'string' && reasoning.trim() !== '') return reasoning;
+  // Tool-native models (Onyx-style) may answer with a tool call instead of
+  // prose even unprompted; the arguments blob is JSON text the downstream
+  // parse/salvage layer can hunt through like any other suspect answer.
+  const calls = first.message.tool_calls;
+  if (Array.isArray(calls) && isRecord(calls[0]) && isRecord(calls[0].function)) {
+    const args = calls[0].function.arguments;
+    if (typeof args === 'string' && args.trim() !== '') return args;
+  }
   return null;
+}
+
+/** finish_reason off choices[0] — a safe structural token ('stop', 'length',
+ * 'tool_calls', …) used only for diagnostics, never parsed as content. */
+function readFinishReason(body: unknown): string | null {
+  if (!isRecord(body) || !Array.isArray(body.choices)) return null;
+  const first: unknown = body.choices[0];
+  if (!isRecord(first)) return null;
+  return typeof first.finish_reason === 'string' ? first.finish_reason : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,11 +166,11 @@ function readCompletionText(body: unknown): string | null {
  * nothing the validation layer doesn't already guarantee. temperature 0
  * because extraction is a read, not a composition.
  */
-export async function runCustomChat(
+export async function runCustomChatDetailed(
   cfg: CustomEndpointConfig,
   messages: ChatMessage[],
   deps: CustomDeps = {},
-): Promise<string> {
+): Promise<{ text: string; finishReason: string | null }> {
   // Wrapped, not aliased: calling the global `fetch` through a property
   // reference rebinds `this` and workerd throws "Illegal invocation".
   const fetchImpl = deps.fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
@@ -201,7 +218,16 @@ export async function runCustomChat(
   }
   const text = readCompletionText(body);
   if (text === null) throw new Error(UNREADABLE_RESPONSE);
-  return text;
+  return { text, finishReason: readFinishReason(body) };
+}
+
+/** The plain-text contract most callers want. */
+export async function runCustomChat(
+  cfg: CustomEndpointConfig,
+  messages: ChatMessage[],
+  deps: CustomDeps = {},
+): Promise<string> {
+  return (await runCustomChatDetailed(cfg, messages, deps)).text;
 }
 
 /**

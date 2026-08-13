@@ -537,6 +537,10 @@ export interface StatementPagesRoundResult {
   /** True when a round's answer had to be salvaged mid-JSON — rows may be
    * missing from it, and the client must carry that loudly into finalize. */
   truncated: boolean;
+  /** Present when the round produced ZERO rows: a short structural
+   * explanation (finish_reason etc. — never model prose) so an all-empty
+   * read can say WHY instead of just "nothing could be read". */
+  diagnostic?: string | null;
 }
 
 /** POST .../statement/pages/finalize body. */
@@ -546,6 +550,9 @@ export interface StatementPagesFinalizeInput {
   truncated: boolean;
   /** Scopes the finalize to the begin that issued it (stale-tab safety). */
   runId?: string;
+  /** The last round's zero-row diagnostic (or failure copy) — stored into
+   * the failed job's error when the whole read produced nothing. */
+  diagnostic?: string;
 }
 
 /** POST /api/transactions — single or batch */

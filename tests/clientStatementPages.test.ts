@@ -927,6 +927,18 @@ describe('finalizeClientStatement', () => {
     expect(tables.statement_extractions[0].providerState).toBeNull();
   });
 
+  it('zero rows with a client diagnostic → the failure names its cause (2026-08-13 incident)', async () => {
+    const { env } = finalizeEnv();
+    const result = await finalizeClientStatement(env, DOC, {
+      rows: [],
+      truncated: true,
+      diagnostic: 'The model answered but no transaction rows could be read from it (finish_reason: length).',
+    });
+    expect(result.status).toBe('failed');
+    expect(result.error).toMatch(/no transactions could be read/i);
+    expect(result.error).toContain('finish_reason: length');
+  });
+
   it('rows are suggestions, not trusted input: never-guess normalization applies verbatim', async () => {
     const { env } = finalizeEnv();
     const result = await finalizeClientStatement(env, DOC, {
