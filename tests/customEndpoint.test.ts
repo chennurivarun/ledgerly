@@ -535,10 +535,38 @@ describe('runCustomChat — error taxonomy (bodies dropped, key never quoted)', 
     await expect(runCustomChat(CFG, MESSAGES, { fetchImpl })).rejects.toThrow(/rate limited/i);
   });
 
-  it('500 → generic readable copy', async () => {
-    const { fetchImpl } = failing(500);
+  it('400 → invalid-request copy naming the likely causes and the status', async () => {
+    const { fetchImpl } = failing(400);
+    const err = await runCustomChat(CFG, MESSAGES, { fetchImpl }).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/rejected this request as invalid \(HTTP 400\)/i);
+    expect((err as Error).message).not.toContain(SECRET);
+  });
+
+  it('402 → billing copy naming the status', async () => {
+    const { fetchImpl } = failing(402);
     await expect(runCustomChat(CFG, MESSAGES, { fetchImpl })).rejects.toThrow(
-      /could not process this request/i,
+      /billing reasons \(HTTP 402\)/i,
+    );
+  });
+
+  // The status NUMBER is the one response detail the taxonomy surfaces — it is
+  // structural (nothing user-typed can ride in an integer), and without it a
+  // rejection is undiagnosable (live incident 2026-08-14).
+  for (const status of [500, 502, 503]) {
+    it(`${status} → server-error copy naming the status`, async () => {
+      const { fetchImpl } = failing(status);
+      const err = await runCustomChat(CFG, MESSAGES, { fetchImpl }).catch((e: Error) => e);
+      expect((err as Error).message).toMatch(
+        new RegExp(`server error \\(HTTP ${status}\\)`, 'i'),
+      );
+      expect((err as Error).message).not.toContain(SECRET);
+    });
+  }
+
+  it('an unmapped status → generic copy still naming the status', async () => {
+    const { fetchImpl } = failing(418);
+    await expect(runCustomChat(CFG, MESSAGES, { fetchImpl })).rejects.toThrow(
+      /could not process this request \(HTTP 418\)/i,
     );
   });
 

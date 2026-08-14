@@ -44,13 +44,29 @@ export const UNREADABLE_RESPONSE =
 // body can echo the request (including the Authorization header on some
 // misconfigured proxies), and this provider's URL is user-typed — neither the
 // key nor a URL that might embed one may ever reach a log line or a stored
-// extraction row (spec §20).
+// extraction row (spec §20). The bare status NUMBER is the one detail that is
+// safe to surface: it is structural, carries nothing user-typed, and it is
+// the fact that separates "your account" from "their servers" (live incident
+// 2026-08-14: twelve identical rejections were undiagnosable without it).
 // ---------------------------------------------------------------------------
 
 function readableHttpError(status: number): Error {
   if (status === 401 || status === 403) {
     return new Error(
       'Your custom endpoint rejected the API key. Check the key saved in Settings — or remove it if the server is keyless.',
+    );
+  }
+  if (status === 400) {
+    // The two ways a well-formed round gets refused as "invalid": a
+    // text-only model handed image pages, or an input past the model's size
+    // limits. Both are Settings-level fixes, so the message names both.
+    return new Error(
+      'Your custom endpoint rejected this request as invalid (HTTP 400). The model may not accept image input, or the request may be too large for it — check the model in Settings.',
+    );
+  }
+  if (status === 402) {
+    return new Error(
+      'Your custom endpoint refused this request for billing reasons (HTTP 402). Check the credits or plan on the account behind the API key.',
     );
   }
   if (status === 404) {
@@ -63,7 +79,14 @@ function readableHttpError(status: number): Error {
   if (status === 429) {
     return new Error('Your custom endpoint rate limited this request. Try again in a moment.');
   }
-  return new Error('Your custom endpoint could not process this request. Try again.');
+  if (status >= 500) {
+    return new Error(
+      `Your custom endpoint had a server error (HTTP ${status}). Try again in a moment.`,
+    );
+  }
+  return new Error(
+    `Your custom endpoint could not process this request (HTTP ${status}). Try again.`,
+  );
 }
 
 // ---------------------------------------------------------------------------
