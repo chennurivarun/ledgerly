@@ -208,6 +208,100 @@ its own statement text. `toStatementRowInputs`'s output shape is
 Ledgerly-specific (it matches `worker/ai/normalize.ts`'s raw-row envelope);
 a different host maps `PackRow[]` to its own row shape instead.
 
+## Distillation
+
+Writing a pack by hand means opening a real statement next to a text editor —
+exactly the thing rule 1 above says not to do. Distillation turns that around:
+given a statement's per-page text and the rows a user already **confirmed**
+in review (an AI read that succeeded once), `shared/packs/distill.ts` infers
+a draft pack automatically, then **proves** it with the same engine described
+above — before ever handing it back. A draft that doesn't fully verify
+against the very statement it came from is refused, never returned.
+
+```ts
+function distillStatementPack(
+  pages: readonly string[],
+  anchors: readonly DistillAnchor[], // { date, amount, type } — no merchant text
+  identity: DistillIdentity,          // { id, name, country, currency } — UI-supplied
+): DistillResult; // { ok: true, pack, proof } | { ok: false, reason }
+
+function renderPackModule(pack: StatementPack): string; // the downloadable .ts file
+```
+
+An anchor is deliberately thin: date, amount, and direction only — no
+merchant text (review-time cleaning means it no longer matches the printed
+descriptor anyway) and no page/line position. At least `DISTILL_MIN_ANCHORS`
+(3) are required; fewer refuses outright, since inference needs ground truth
+to work from.
+
+### How it infers a draft
+
+1. **Date format.** Each anchor's ISO date is rendered in every
+   `PackDateFormat` and checked against the pages; the format whose
+   renderings appear for at least `DISTILL_MIN_ANCHOR_MATCH` (60%) of anchors
+   wins. No qualifying format, or a tie for the win, refuses.
+2. **Row anchoring.** Lines containing a winning-format anchor rendering are
+   candidate row starts. Whether they're consistently preceded by a serial
+   number (`^\d+\s{2,}` before the date) decides whether the drafted grammar
+   declares `serial-chain`.
+3. **Tail & balance.** Candidate rows are checked for a trailing
+   `amount␣␣balance` money pair. None found refuses — spec 1 only ever drafts
+   `balance-delta` packs, and that mode needs a running balance column.
+4. **Grammar assembly**, from fixed structural templates only — never from
+   interpolated statement text:
+   - `rowStart` / `rowTail` come from a small per-date-format template table,
+     the same shape as the bundled reference pack.
+   - `headerLine` is the line that repeats (after generalization, below) on
+     at least 60% of pages and sits closest above a page's first candidate
+     row.
+   - `openingBalanceLine` seeds the balance chain. Because the engine seeds
+     it exactly once, before any row opens, the seed must sit above the
+     statement's **true** first row — not just the first anchored one, since
+     unanchored rows earlier in the statement still open under the same
+     generic grammar once the real engine runs. The distiller locates that
+     true first row generically, then walks backward to the nearest line
+     carrying a money token.
+   - `furniture` is every other 60%-repeated generalized line, capped at 8.
+   - `signature` is the generalized header line, plus — when one exists — one
+     more repeated, non-page-1-only line with real alphabetic content.
+
+   **Generalization is what keeps a distilled pack privacy-safe**: every
+   selected line is escaped literally except money tokens (→
+   `[\d,]+\.\d{2}`), runs of 5+ digits (→ `\d+` — account numbers, CRNs,
+   phone numbers never survive), and runs of 2+ spaces (→ `\s{2,}`). A line
+   that never gets selected (not repeated, not the balance seed) never
+   appears in the pack at all — this is how a masthead name or account
+   number sitting next to a genuinely repeating header line stays out of the
+   output.
+5. **The proof.** The assembled candidate must pass `validatePack`, then
+   `parseStatement` must verify against `pages`. Parsed rows are matched
+   against anchors by exact date + cents-exact amount + type (each parsed
+   row counts once); at least `DISTILL_MIN_ANCHOR_MATCH` of anchors must
+   match — not all of them, since a user's review-time edit can legitimately
+   diverge from the printed truth. A first-candidate failure retries a small
+   bounded space (serial on/off, smaller furniture subsets, an alternate
+   header pick — capped at 12 total attempts) before refusing.
+
+A successful distillation typically **reads more than it was given**:
+anchors only need to cover a representative slice of a statement (the
+real-world shape — a user only confirms what an AI review surfaced), but the
+drafted grammar is generic across dates, so `proof.rows` commonly exceeds
+`proof.anchorsTotal`.
+
+Refusal reasons follow the same structural-only contract as the engine's:
+never a date, amount, description, or account number — always a shape
+("no repeating table header found", "no running balance column found — the
+v1 pack format needs one").
+
+### The downloadable module
+
+`renderPackModule(pack)` renders exactly what a contributor would hand to the
+commons: an SPDX `CC0-1.0`-headed, byte-shaped-like-the-bundled-packs `.ts`
+file — `import type { StatementPack } from '../spec';` followed by one
+`export const <camelCasedId>: StatementPack = {...}`. The id's country
+segment is kept as-is; every remaining `.`/`-`-separated segment is
+capitalized and concatenated (`in.my-bank.savings` → `inMyBankSavings`).
+
 ## Licensing
 
 The pack **data** in `shared/packs/packs/` is dedicated to the public domain
