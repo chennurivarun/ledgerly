@@ -207,3 +207,17 @@ directly and call `detectPack` / `parseStatement` / `toStatementRowInputs` on
 its own statement text. `toStatementRowInputs`'s output shape is
 Ledgerly-specific (it matches `worker/ai/normalize.ts`'s raw-row envelope);
 a different host maps `PackRow[]` to its own row shape instead.
+
+## Licensing
+
+The pack **data** in `shared/packs/packs/` is dedicated to the public domain
+under [CC0 1.0](../shared/packs/packs/LICENSE) — copy it into any project,
+open or commercial, no attribution required, no strings. Bank statement
+layouts are facts; facts belong to everyone, and the commons only works if
+every finance app can adopt a pack without a lawyer in the room.
+
+Everything else — the engine, the app, the tests — remains
+[AGPL-3.0](../LICENSE). Embedding `engine.ts` in your project carries AGPL
+obligations; re-implementing the (deliberately small, fully documented)
+engine semantics above against the CC0 pack data does not. Contributions to
+the packs directory are accepted only under the same CC0 dedication.

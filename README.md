@@ -169,3 +169,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). The product spec lives in
 [AGPL-3.0](LICENSE). You can self-host, modify, and redistribute freely; if
 you offer a modified Ledgerly as a network service, you must share your
 changes under the same license.
+
+**Exception — the pack data is public domain.** Everything under
+`shared/packs/packs/` (the community bank-format packs) is dedicated to the
+public domain under [CC0 1.0](shared/packs/packs/LICENSE): any project, open
+or commercial, may embed the packs with no obligations and no attribution.
+The engine that executes them stays AGPL. Details in
+[docs/PACKS.md](docs/PACKS.md#licensing).

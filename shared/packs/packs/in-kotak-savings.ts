@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: CC0-1.0
+// Pack DATA in this directory is dedicated to the public domain (CC0 1.0,
+// see ./LICENSE) so any project can embed it — the engine and the rest of
+// Ledgerly remain AGPL-3.0.
+//
 // Kotak Mahindra Bank — savings account statement (the commons' reference
 // pack, S18). Authored from the layout of a real statement; contains ONLY
 // layout knowledge — no statement content, no customer data, ever.
