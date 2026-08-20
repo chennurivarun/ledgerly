@@ -131,13 +131,17 @@ export const api = {
       { method: 'POST' },
     ),
 
-  /** Claim a statement for the browser-pages read (custom provider, S16).
-   * The returned runId scopes every later round/finalize/abort to THIS run —
-   * a stale tab's late abort can no longer cancel a newer read. */
-  beginStatementPages: (id: string) =>
+  /** Claim a statement for the browser-pages read — either a community pack
+   * read (packId given, no AI provider needed) or the custom-endpoint
+   * AI-rounds flow (S16, packId omitted — the legacy no-body shape). The
+   * returned runId scopes every later round/finalize/abort to THIS run — a
+   * stale tab's late abort can no longer cancel a newer read. */
+  beginStatementPages: (id: string, packId?: string) =>
     request<{ ok: true; runId: string }>(
       `/api/documents/${encodeURIComponent(id)}/statement/pages/begin`,
-      { method: 'POST' },
+      packId === undefined
+        ? { method: 'POST' }
+        : { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ packId }) },
     ),
 
   /** One round of browser-extracted pages → raw rows. Persists nothing. */

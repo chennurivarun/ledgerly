@@ -655,6 +655,46 @@ describe('beginClientStatement', () => {
 });
 
 // ---------------------------------------------------------------------------
+// begin — community pack claim (sprint 18): no AI provider needed at all
+// ---------------------------------------------------------------------------
+
+describe('beginClientStatement — community pack claim', () => {
+  it('a valid packId claims the job under provider "pack" — no AI provider configured', async () => {
+    const { env, tables } = makeEnv({
+      settings: new Map([['aiProvider', JSON.stringify('off')]]),
+    });
+    const begun = await beginClientStatement(env, DOC, { packId: 'in.kotak.savings' });
+    expect(begun.ok).toBe(true);
+    const job = tables.statement_extractions[0];
+    expect(job.provider).toBe('pack');
+    expect(job.model).toBe('in.kotak.savings');
+    const state = parseClientPagesState(job.providerState);
+    expect(state).toMatchObject({ v: 1, mode: 'client-pages', runId: begun.runId });
+  });
+
+  it('an unknown packId 400s with the reload copy, and takes no claim', async () => {
+    const { env, tables } = makeEnv({
+      settings: new Map([['aiProvider', JSON.stringify('off')]]),
+    });
+    await expect(beginClientStatement(env, DOC, { packId: 'xx.nope.savings' })).rejects.toThrow(
+      /no community pack with that id ships in this build/i,
+    );
+    expect(tables.statement_extractions).toHaveLength(0);
+  });
+
+  it('the packId path still gates on PDF mime — assertStatementMime runs for a pack claim too', async () => {
+    const { env, tables } = makeEnv({
+      settings: new Map([['aiProvider', JSON.stringify('off')]]),
+      documents: [{ id: DOC, mimeType: 'text/csv', objectKey: OBJECT_KEY, size: 10, pageCount: null }],
+    });
+    await expect(beginClientStatement(env, DOC, { packId: 'in.kotak.savings' })).rejects.toThrow(
+      /Transactions page/i,
+    );
+    expect(tables.statement_extractions).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // /statement/extract against a browser claim — the 409 pin, and the fresh-run
 // refusal
 // ---------------------------------------------------------------------------
@@ -727,6 +767,15 @@ describe('clientStatementRound', () => {
     });
     await expect(
       clientStatementRound(sarvamRun.env, DOC, { pages: [textPage(0)] }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('409s against a pack claim — rounds are custom-provider machinery, never fired against a pack read', async () => {
+    const packClaim = roundEnv({
+      statement_extractions: [clientPendingJob({ provider: 'pack', model: 'in.kotak.savings' })],
+    });
+    await expect(
+      clientStatementRound(packClaim.env, DOC, { pages: [textPage(0)] }),
     ).rejects.toMatchObject({ status: 409 });
   });
 
@@ -917,6 +966,86 @@ describe('finalizeClientStatement', () => {
     expect(result.status).toBe('partial');
     expect(result.truncated).toBe(true);
     expect(result.rowCount).toBe(300);
+  });
+
+  it('the raw-response bound (5000) also marks the run truncated, even when the real 300-cap never fires', async () => {
+    // Isolates the OTHER cap: normalizeStatementRows' own `capped` signal at
+    // the 5000-row raw-response sanity bound used to be silently discarded,
+    // so a run whose raw response blew past it — but whose outstanding
+    // (post-confirmed-exclusion) list happened to land under 300 — reported
+    // 'suggested' as if nothing were missing, even though row 5001 was
+    // dropped before anyone ever looked at it.
+    const confirmed = Array.from({ length: 5000 }, (_, i) => ({
+      id: `row-confirmed-${i}`,
+      documentId: DOC,
+      idx: i,
+      fields: JSON.stringify({
+        date: { value: '2026-03-04', confidence: 0.9 },
+        merchant: { value: `M ${i}`, confidence: 0.9 }, // cleanBankDescriptor("m-i")
+        amount: { value: i + 1, confidence: 0.9 },
+        type: { value: 'expense', confidence: 0.9 },
+        category: { value: null, confidence: 0 },
+      }),
+      status: 'confirmed',
+      duplicate: 0,
+      lowestConfidence: 0.9,
+      createdAt: minutesAgo(30),
+    }));
+    const { env } = finalizeEnv({ statement_rows: confirmed });
+
+    // 5001 raw rows: normalizeStatementRows keeps only the first 5000
+    // (m-0..m-4999) under the raw bound — row 5000 (m-5000) never exists
+    // past that point. Every one of those first 5000 is already confirmed,
+    // so the real 300-cap never even triggers (outstanding is empty).
+    const rows = Array.from({ length: 5001 }, (_, i) => envelopeRow(`m-${i}`, i + 1));
+    const result = await finalizeClientStatement(env, DOC, { rows, truncated: false });
+
+    expect(result.status).toBe('partial');
+    expect(result.truncated).toBe(true);
+    expect(result.rowCount).toBe(5000); // 5000 confirmed kept, 0 fresh
+    expect(result.rows.filter((r) => r.status === 'proposed')).toHaveLength(0);
+  });
+
+  it('a >300-row statement advances past its first page once those rows are confirmed (cap-before-exclusion regression)', async () => {
+    // Live bug: normalizeStatementRows used to cap at MAX_STATEMENT_ROWS
+    // BEFORE confirmed-row exclusion, so re-running the same statement after
+    // importing its first 300 rows re-capped to that SAME first 300, excluded
+    // every one of them as already-confirmed, and proposed zero — a
+    // statement over 300 rows could never finish.
+    const { env, tables } = finalizeEnv();
+    const rows = Array.from({ length: 305 }, (_, i) => envelopeRow(`m-${i}`, i + 1));
+
+    const first = await finalizeClientStatement(env, DOC, { rows, truncated: false });
+    expect(first.status).toBe('partial');
+    expect(first.rowCount).toBe(300);
+    expect(tables.statement_rows).toHaveLength(300);
+
+    // The user imports everything proposed — mark those 300 rows confirmed,
+    // the same status confirmStatementRows leaves behind.
+    for (const row of tables.statement_rows) row.status = 'confirmed';
+
+    // A fresh browser-pages claim, as a real re-run would take.
+    tables.statement_extractions[0].status = 'pending';
+    tables.statement_extractions[0].providerState = JSON.stringify({
+      v: 1,
+      mode: 'client-pages',
+      beganAt: NOW_ISH(),
+    });
+
+    // Re-running the SAME 305 rows must not re-cap the same first 300 and
+    // exclude them all to zero — rows 300–304 must appear as freshly
+    // proposed, and the job must no longer report partial.
+    const second = await finalizeClientStatement(env, DOC, { rows, truncated: false });
+    expect(second.status).toBe('suggested');
+    expect(second.truncated).toBe(false);
+    expect(second.rowCount).toBe(305);
+    const proposed = second.rows.filter((r) => r.status === 'proposed');
+    expect(proposed).toHaveLength(5);
+    // cleanBankDescriptor title-cases the lone letter token ("m-300" → "M 300")
+    // — enrichment applies on both runs, so the assertion matches its output.
+    expect(proposed.map((r) => r.merchant.value).sort()).toEqual(
+      ['M 300', 'M 301', 'M 302', 'M 303', 'M 304'].sort(),
+    );
   });
 
   it('zero rows → an honest failed job, never "0 proposed"; state cleared', async () => {

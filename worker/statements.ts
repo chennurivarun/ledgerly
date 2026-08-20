@@ -7,6 +7,7 @@
 // whole statement says so instead of quietly returning less.
 import { cleanBankDescriptor } from '../shared/descriptors';
 import { txFingerprint } from '../shared/fingerprint';
+import { statementPackById } from '../shared/packs/registry';
 import {
   CLIENT_STATEMENT_PAGES_PER_ROUND,
   MAX_FILE_BYTES,
@@ -733,13 +734,33 @@ async function insertRows(db: D1Database, rows: RowRow[]): Promise<void> {
 }
 
 /**
+ * Sanity bound for the RAW rows a single run may hand normalizeStatementRows
+ * — not the proposal cap (MAX_STATEMENT_ROWS, applied below). Kept far above
+ * any real statement so it only guards against a genuinely malformed
+ * response, never against a normal read: the actual cap has to run AFTER
+ * confirmed-row exclusion (see persistStatementRun) or a statement over 300
+ * rows can never advance past its first page.
+ */
+const STATEMENT_RAW_ROWS_BOUND = 5000;
+
+/**
  * The one persistence flow every completed read goes through, whichever
  * provider produced the rows and however many requests it took: normalize,
  * enrich (clean merchants + rule-filled categories, sprint 13), hide rows the
- * user already imported, pre-flag duplicates, replace the untriaged
- * proposals, save the job as suggested/partial. Extracted verbatim from the
- * original single-request path (sprint 12) so the resumable finalize step
- * reuses it rather than forking it.
+ * user already imported, cap at MAX_STATEMENT_ROWS, pre-flag duplicates,
+ * replace the untriaged proposals, save the job as suggested/partial.
+ * Extracted verbatim from the original single-request path (sprint 12) so
+ * the resumable finalize step reuses it rather than forking it.
+ *
+ * Cap ordering, pinned (sprint 18 regression): the cap MUST run after
+ * confirmed-row exclusion, not before. Capping the raw rows first meant a
+ * >300-row statement could never finish: run 1 proposes rows 1–300, the user
+ * imports them, run 2 re-normalizes the SAME statement, caps to the SAME
+ * first 300 rows again, excludes every one of them as already-confirmed, and
+ * proposes zero — a statement with 301+ transactions was stuck forever. The
+ * raw normalize below uses a generous sanity bound instead of the real cap;
+ * the real cap is applied to `outstanding`, the list that is left once rows
+ * the user already imported are excluded.
  */
 async function persistStatementRun(
   env: Env,
@@ -750,7 +771,16 @@ async function persistStatementRun(
   model: string,
   now: string,
 ): Promise<StatementExtraction> {
-  const { rows: normalized, capped } = normalizeStatementRows(run.rows, settings.categories);
+  // `rawCapped` fires only when the RAW response blew past the 5000-row
+  // sanity bound — a real signal, not a hypothetical: a run that big is
+  // almost certainly malformed, and silently dropping the tail without
+  // marking the result truncated would be exactly the kind of quiet loss
+  // this pipeline exists to refuse.
+  const { rows: normalized, capped: rawCapped } = normalizeStatementRows(
+    run.rows,
+    settings.categories,
+    STATEMENT_RAW_ROWS_BOUND,
+  );
   // Enrichment runs BEFORE anything fingerprints: the confirmed-row hiding,
   // the duplicate pre-flags and the eventual insert all see the same cleaned
   // merchant name.
@@ -763,7 +793,8 @@ async function persistStatementRun(
 
   // Rows the user already imported keep their place and are not offered
   // again, so re-running after importing half a statement shows the half
-  // that is still outstanding — not the whole thing over.
+  // that is still outstanding — not the whole thing over. This MUST run
+  // before the MAX_STATEMENT_ROWS cap below — see the doc comment above.
   const confirmed = await readConfirmedRows(env.DB, documentId);
   const alreadyImported = new Set(
     confirmed
@@ -771,10 +802,15 @@ async function persistStatementRun(
       .filter((fp): fp is string => fp !== null),
   );
 
-  const fresh = fields.filter((f) => {
+  const outstanding = fields.filter((f) => {
     const fp = statementRowFingerprint(f, account);
     return fp === null || !alreadyImported.has(fp);
   });
+
+  // NOW the real cap — applied to what is actually left to propose, not to
+  // the raw response. `capped` is this run's `truncated` signal.
+  const capped = outstanding.length > MAX_STATEMENT_ROWS;
+  const fresh = capped ? outstanding.slice(0, MAX_STATEMENT_ROWS) : outstanding;
 
   const existing = await existingFingerprints(
     env.DB,
@@ -782,6 +818,8 @@ async function persistStatementRun(
       .map((f) => statementRowFingerprint(f, account))
       .filter((fp): fp is string => fp !== null),
   );
+  // Duplicate flags are per-proposed-row, so they're computed on the capped
+  // list — a row dropped at the cap is not proposed and needs no flag.
   const duplicates = flagDuplicates(
     fresh.map((f) => statementRowFingerprint(f, account)),
     existing,
@@ -811,7 +849,7 @@ async function persistStatementRun(
     })),
   );
 
-  const truncated = run.truncated || capped;
+  const truncated = run.truncated || rawCapped || capped;
   await saveJob(env.DB, {
     documentId,
     // 'partial' is the loud status: rows may be missing, and the UI says so.
@@ -1134,24 +1172,58 @@ export async function runStatementExtraction(
 // the one persistence pipeline every provider's rows go through at finalize.
 // ---------------------------------------------------------------------------
 
+/** Optional packId off a request body — absent (or non-string) means the
+ * plain AI-rounds begin. */
+function readPackId(body: unknown): string | null {
+  if (!isRecord(body)) return null;
+  return typeof body.packId === 'string' ? body.packId : null;
+}
+
+export const UNKNOWN_PACK_MESSAGE =
+  'No community pack with that id ships in this build. Reload the tab, then try again.';
+
 /**
- * POST /api/documents/:id/statement/pages/begin — the statement gates for
- * provider 'custom' (URL + model required, PDF mime), then the SAME claim
- * every other run takes, with a client-pages providerState parked so a
- * colliding read 409s and the S12 tick path knows to keep its hands off.
+ * POST /api/documents/:id/statement/pages/begin — two shapes.
+ *
+ * A packId claims a COMMUNITY PACK read (sprint 18): the browser already
+ * parsed and chain-verified the statement locally against a bundled pack, so
+ * this claim needs NO provider configured at all — the provider gate is
+ * skipped entirely and the job records provider 'pack' with the pack id as
+ * its model. An unknown packId is a readable 400 (almost certainly a stale
+ * bundle — the copy points at the cure), never a guess.
+ *
+ * No packId is the sprint-16 AI-rounds begin, byte-for-byte: the statement
+ * gates for provider 'custom' (URL + model required), same claim.
+ *
+ * Either way: PDF mime is required, and the claim/runId/providerState
+ * mechanics are shared — a colliding read 409s and the S12 tick path knows
+ * to keep its hands off.
  */
 export async function beginClientStatement(
   env: Env,
   documentId: string,
+  body: unknown = null,
 ): Promise<{ ok: true; runId: string }> {
   const doc = await readDocumentRow(env.DB, documentId);
-  const settings = await readSettings(env.DB);
   const now = new Date().toISOString();
 
-  const { provider, model } = selectStatementProvider(settings);
-  if (provider !== 'custom') {
-    // Anthropic/Sarvam read the PDF themselves — their door is /extract.
-    throw new ApiFail(400, 'This provider reads statements directly — use Read as statement.');
+  const packId = readPackId(body);
+  let provider: string;
+  let model: string;
+
+  if (packId !== null) {
+    const pack = statementPackById(packId);
+    if (!pack) throw new ApiFail(400, UNKNOWN_PACK_MESSAGE);
+    // A pack read needs NO AI provider — that is the point.
+    provider = 'pack';
+    model = pack.id;
+  } else {
+    const settings = await readSettings(env.DB);
+    ({ provider, model } = selectStatementProvider(settings));
+    if (provider !== 'custom') {
+      // Anthropic/Sarvam read the PDF themselves — their door is /extract.
+      throw new ApiFail(400, 'This provider reads statements directly — use Read as statement.');
+    }
   }
   assertStatementMime(doc.mimeType);
 
@@ -1203,7 +1275,16 @@ export async function clientStatementRound(
   deps: CustomDeps = {},
 ): Promise<StatementPagesRoundResult> {
   await readDocumentRow(env.DB, documentId);
-  const { state } = await requireClientClaim(env.DB, documentId, readRunId(body));
+  const { job, state } = await requireClientClaim(env.DB, documentId, readRunId(body));
+  // A round is the custom-provider machinery specifically — a pack claim
+  // (provider 'pack', sprint 18) holds the SAME client-pages providerState
+  // shape (it needs the claim-visibility mechanics too) but has no rounds,
+  // no model, no key: a stray round against one must never fire a real AI
+  // call. Same readable 409 as no-claim-at-all — the caller has nothing to
+  // retry differently.
+  if (job.provider !== 'custom') {
+    throw new ApiFail(409, NO_CLIENT_READ_MESSAGE);
+  }
   const pages = validateRoundPages(body);
 
   const settings = await readSettings(env.DB);

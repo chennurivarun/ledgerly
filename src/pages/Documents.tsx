@@ -27,11 +27,12 @@ import {
   createCancelToken,
   runClientStatementRead,
   type CancelToken,
+  type ClientReadMode,
+  type ClientReadResult,
 } from '../components/ai/clientPages';
 import {
   customMissingConfig,
   missingKeyProvider,
-  pdfStatementsBlockedCopy,
   preflightCostLine,
   preflightSummary,
   providerCanReadPdfStatements,
@@ -222,6 +223,12 @@ export default function Documents() {
   const missingKey = missingKeyProvider(aiProvider, aiKeySet, sarvamKeySet);
   const customMissing = customMissingConfig(aiProvider, customBaseUrl, aiModel);
   const aiReady = aiOn && missingKey === null && customMissing === null;
+  // Whether the CURRENT provider setup alone can already read any PDF
+  // statement — used both to decide whether a pack miss should fall back to
+  // the provider-driven read (sprint 18) and to gate the page banner
+  // explaining that packs need no provider at all: it's only worth saying
+  // when the provider alone would not already cover every statement.
+  const aiCanReadAnyStatement = aiReady && providerCanReadPdfStatements(aiProvider);
 
   async function handleExtract(doc: DocumentMeta) {
     setRunning({ id: doc.id, kind: 'extract' });
@@ -287,31 +294,27 @@ export default function Documents() {
     }
   }
 
-  // The custom provider's statement path (sprint 16): the browser extracts
-  // the pages and drives begin → rounds → finalize; the worker owns the
-  // model calls and persistence. On the finalized result the EXISTING
-  // machinery takes over unchanged — same store upsert, same auto-open
-  // guard, same review modal. Failures land in the same per-row transient
-  // slot as every other statement error.
-  async function handleClientRead(doc: DocumentMeta) {
-    if (clientRead) return; // one browser read at a time (buttons also gate)
+  // Shared machinery for both browser-driven statement reads — 'auto' pack
+  // detection (sprint 18) and the custom provider's AI-rounds flow (sprint
+  // 16): the one-browser-read-at-a-time slot, live progress label, vanish
+  // guards (via clientRead/clientReadToken, wired below), and the
+  // ClientReadCancelled silence. Returns the settled ClientReadResult, or
+  // null when nothing happened (another read already in flight, the read was
+  // cancelled, or it failed — a failure is already surfaced in
+  // statementError, so callers just stop).
+  async function runClientRead(doc: DocumentMeta, mode: ClientReadMode): Promise<ClientReadResult | null> {
+    if (clientRead) return null; // one browser read at a time (buttons also gate)
     setStatementError(null);
     const token = createCancelToken();
     clientReadToken.current = token;
     setClientRead({ id: doc.id, label: 'Preparing…' });
     try {
-      const result = await runClientStatementRead(
+      return await runClientStatementRead(
         doc.id,
         (label) => setClientRead({ id: doc.id, label }),
         token,
+        mode,
       );
-      applyStatement(result);
-      if (result.status === 'suggested' || result.status === 'partial') {
-        // Same never-steal-focus rule as every other auto-open.
-        setReviewing((current) => (current === null ? { id: doc.id, kind: 'statement' } : current));
-      }
-      // 'failed' is surfaced persistently via the statement row's own error
-      // text (the result just applied) — no toast on top of it.
     } catch (e) {
       if (!(e instanceof ClientReadCancelled)) {
         setStatementError({
@@ -322,9 +325,62 @@ export default function Documents() {
         // pull that state so the chip agrees with the error text.
         void refreshQuiet();
       }
+      return null;
     } finally {
       clientReadToken.current = null;
       setClientRead(null);
+    }
+  }
+
+  // The custom provider's statement path (sprint 16): the browser extracts
+  // the pages and drives begin → rounds → finalize; the worker owns the
+  // model calls and persistence. On the finalized result the EXISTING
+  // machinery takes over unchanged — same store upsert, same auto-open
+  // guard, same review modal. Failures land in the same per-row transient
+  // slot as every other statement error (surfaced inside runClientRead).
+  async function handleClientRead(doc: DocumentMeta) {
+    const result = await runClientRead(doc, 'ai-rounds');
+    // null: nothing to do (guarded, cancelled, or already-surfaced failure).
+    // The AI-rounds mode never misses a pack — it doesn't try one — but the
+    // shared return type still carries the union, so this narrows it.
+    if (result === null || 'outcome' in result) return;
+    applyStatement(result);
+    if (result.status === 'suggested' || result.status === 'partial') {
+      // Same never-steal-focus rule as every other auto-open.
+      setReviewing((current) => (current === null ? { id: doc.id, kind: 'statement' } : current));
+    }
+    // 'failed' is surfaced persistently via the statement row's own error
+    // text (the result just applied) — no toast on top of it.
+  }
+
+  // The statement button's handler (sprint 18): try a bundled community pack
+  // FIRST, entirely in the browser, claiming nothing at the worker unless a
+  // pack actually verifies — instant, offline, zero AI, zero cost. A miss
+  // (no pack matches this bank, or a matched pack could not verify) falls
+  // back to the existing provider-driven read when one is configured and
+  // ready; otherwise it explains what to do next instead of just failing.
+  async function handleStatementClick(doc: DocumentMeta) {
+    const result = await runClientRead(doc, 'auto');
+    if (result === null) return; // guarded, cancelled, or already-surfaced failure
+    if ('outcome' in result) {
+      if (aiCanReadAnyStatement) {
+        // The existing preflight dialog (and its onConfirm dispatch) takes
+        // over unchanged from here.
+        void handleStatementPreflight(doc);
+        return;
+      }
+      setStatementError({
+        id: doc.id,
+        message:
+          result.reason !== null
+            ? `A community pack matched but could not verify this statement (${result.reason}) — connect an AI provider in Settings to read it.`
+            : 'No community pack matches this bank yet. Connect an AI provider in Settings to bootstrap the first read.',
+      });
+      return;
+    }
+    applyStatement(result);
+    if (result.status === 'suggested' || result.status === 'partial') {
+      setReviewing((current) => (current === null ? { id: doc.id, kind: 'statement' } : current));
     }
   }
 
@@ -688,18 +744,22 @@ export default function Documents() {
           </Link>
         </div>
       )}
-      {aiReady && !providerCanReadPdfStatements(aiProvider) && documents.some((d) => d.mimeType === 'application/pdf') && (
+      {!aiCanReadAnyStatement && documents.some((d) => d.mimeType === 'application/pdf') && (
         // Shown once for the whole vault (same convention as the banners
-        // above), not per row — every PDF's "Read as statement" button is
-        // disabled for the same reason, so repeating it on each row would
-        // just be noise. With aiReady true only Workers AI is still blocked
-        // (custom reads statements via the browser-pages flow since S16);
-        // the helper owns the copy so this can never blame the wrong one.
+        // above), not per row. Statements are the one AI surface that
+        // doesn't strictly need a provider (sprint 18): a bank with a
+        // bundled community pack reads free and offline, no AI involved — a
+        // provider only matters for bootstrapping a bank without one yet, so
+        // this stays hidden once the active provider can already read
+        // everything (aiCanReadAnyStatement).
         <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-sm text-muted">
           <Sparkles className="size-4 shrink-0 text-accent" aria-hidden />
-          <span>{pdfStatementsBlockedCopy(aiProvider)}</span>
+          <span>
+            Statements from a bank with a community pack read free, no AI needed — connect the
+            Anthropic, Sarvam, or custom provider in Settings to also read banks without one.
+          </span>
           <Link to="/settings" className="font-medium text-accent hover:underline">
-            Switch in Settings
+            Go to Settings
           </Link>
         </div>
       )}
@@ -759,18 +819,16 @@ export default function Documents() {
                 !!statement &&
                 (statement.status === 'suggested' || statement.status === 'partial') &&
                 proposedCount > 0;
-              // Ready like Extract, plus PDF-only — but the backend rejects
-              // Workers AI for PDFs (Anthropic and Sarvam both read them),
-              // so a workers-ai user still sees the button (not hidden) with
-              // a disabled state and an honest reason, rather than a click
-              // that just fails server-side.
+              // PDF-only (spec). No provider requirement any more (sprint 18):
+              // a pack read needs no AI at all, so the button never has to
+              // wait on aiReady — handleStatementClick tries a pack first and
+              // only reaches for the configured provider on a miss.
               // Also covers the dead-end where a job landed in
               // 'suggested'/'partial' with zero proposed rows — a real
               // outcome (a PDF with no readable table, rows pruned, or
               // /api/state's newest-10-jobs cap meaning rows:[] even though
               // rowCount > 0) that otherwise leaves no action at all.
               const showStatementAction =
-                aiReady &&
                 isPdf &&
                 (!statement ||
                   STATEMENT_REEXTRACTABLE_STATUSES.includes(statement.status) ||
@@ -781,8 +839,6 @@ export default function Documents() {
                   // 2026-08-13: confirmed+truncated left no action at all.
                   statement.status === 'confirmed' ||
                   ((statement.status === 'suggested' || statement.status === 'partial') && proposedCount === 0));
-              const statementBlockedByProvider =
-                showStatementAction && !providerCanReadPdfStatements(aiProvider);
               return (
                 <li key={doc.id} className="flex flex-wrap items-center gap-3 py-3">
                   <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
@@ -872,10 +928,6 @@ export default function Documents() {
                     </Button>
                   )}
                   {showStatementAction && (
-                    // The reason for the disabled state (Workers AI can't
-                    // read PDF statements) is explained once at the page
-                    // level above, not repeated per row — matches the
-                    // !aiOn/keyMissing banners' once-per-vault convention.
                     <Button
                       variant="ghost"
                       size="sm"
@@ -888,12 +940,10 @@ export default function Documents() {
                       // spinner) — but ONLY statement buttons: the rest of
                       // the page stays live, unlike the `running` slot.
                       disabled={
-                        statementBlockedByProvider ||
                         clientRead !== null ||
                         (running !== null && !(running.id === doc.id && running.kind === 'statement'))
                       }
-                      title={statementBlockedByProvider ? 'PDF statements need the Anthropic or Sarvam provider' : undefined}
-                      onClick={() => void handleStatementPreflight(doc)}
+                      onClick={() => void handleStatementClick(doc)}
                     >
                       <Sparkles className="size-3.5" aria-hidden />
                       {statementButtonLabel(statement)}

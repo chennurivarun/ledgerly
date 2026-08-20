@@ -412,7 +412,12 @@ app.post('/api/documents/:id/statement/extract', async (c) =>
 // key never reaches the client, and nothing is inserted here — rows ride the
 // same review gate as every provider.
 app.post('/api/documents/:id/statement/pages/begin', async (c) =>
-  c.json(await beginClientStatement(c.env, c.req.param('id'))),
+  // Body is optional (packId claims a community pack read, sprint 18; an
+  // absent body is the plain AI-rounds begin) — same optional-body handling
+  // as the abort route below.
+  c.json(
+    await beginClientStatement(c.env, c.req.param('id'), await readJson(c).catch(() => null)),
+  ),
 );
 
 app.post('/api/documents/:id/statement/pages/round', async (c) =>
