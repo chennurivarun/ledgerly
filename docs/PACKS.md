@@ -133,14 +133,20 @@ Every regex field is a **string** (a regex source), never a compiled
    reference numbers wrap arbitrarily) reassembles with a space at the cut
    point; this is accepted, pinned behavior, not a defect — the surrounding
    chain verification is what's load-bearing, not description fidelity.
+   A zero-amount row whose balance is unchanged satisfies BOTH the
+   expense and the income arithmetic at once — the engine refuses that row
+   as direction-ambiguous rather than silently guessing 'expense'.
 5. Amounts, balances and dates are re-parsed and re-validated independently
    of the pack's own regex shape: `[\d,]+\.\d{2}` for money (comma-stripped
    to exact integer cents — no float ever touches a money value), and a
    real UTC-calendar round-trip for dates (a syntactically valid but
-   nonexistent date like `30 Feb` refuses).
-6. Structural bounds: any single line over 2000 characters, or a statement
-   producing more than 5000 rows, refuses outright (a regex-safety and
-   memory bound, not a business rule).
+   nonexistent date like `30 Feb` refuses). Parsed cents are also bounded to
+   `Number.isSafeInteger` — an oversized amount token (enough digits to
+   parse as an imprecise double, or overflow to `Infinity`) refuses rather
+   than "verify" at confidence 1.
+6. Structural bounds: any single line over 2000 characters, a statement of
+   more than 200 pages, or a statement producing more than 5000 rows,
+   refuses outright (a regex-safety and memory bound, not a business rule).
 7. At end of input: a still-open row refuses ("never closed"); zero closed
    rows refuses ("no transaction rows recognized").
 

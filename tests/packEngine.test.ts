@@ -231,6 +231,52 @@ describe('parseStatement — refusals', () => {
     }
   });
 
+  it('refuses a zero-amount row with an unchanged balance as direction-ambiguous, never a silent expense guess', () => {
+    const pages = [
+      page([
+        HEADER_LINE,
+        openingLine('1000.00'),
+        rowLine(1, '05 Aug 2026', 'ROW', '0.00', '1000.00'), // amount 0, balance unchanged: both directions "verify"
+      ]),
+    ];
+    const result = parseStatement(inKotakSavings, pages);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('row 1 has an ambiguous direction in the balance chain');
+      expect(result.reason).not.toMatch(/ROW/);
+    }
+  });
+
+  it('refuses a 17-digit amount token rather than accept an imprecise double at confidence 1', () => {
+    const pages = [
+      page([
+        HEADER_LINE,
+        openingLine('1000.00'),
+        rowLine(1, '05 Aug 2026', 'ROW', '12345678901234567.89', '900.00'),
+      ]),
+    ];
+    const result = parseStatement(inKotakSavings, pages);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('row 1 has an unreadable amount');
+  });
+
+  it('refuses an enormous identical amount/balance token pair rather than let Infinity === Infinity verify', () => {
+    const huge = `${'9'.repeat(900)}.00`; // overflows to Infinity when parsed; line stays under the 2000-char cap
+    const pages = [
+      page([HEADER_LINE, openingLine('1000.00'), rowLine(1, '05 Aug 2026', 'ROW', huge, huge)]),
+    ];
+    const result = parseStatement(inKotakSavings, pages);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('row 1 has an unreadable amount');
+  });
+
+  it('refuses more than 200 pages before doing any per-line work', () => {
+    const pages = Array.from({ length: 201 }, () => '');
+    const result = parseStatement(inKotakSavings, pages);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('statement has too many pages');
+  });
+
   it('refuses more than 5000 rows (generated cheaply, no fixture helper)', () => {
     const lines = [HEADER_LINE, openingLine('100.00')];
     let balanceCents = 10_000; // $100.00
@@ -419,6 +465,37 @@ describe('validatePack', () => {
       },
     };
     expect(validatePack(pack)).toBe('table.rowStart must declare a "rest" named group');
+  });
+
+  it('is not fooled by a fake named group written inside a character class', () => {
+    const pack = {
+      ...basePack(),
+      table: {
+        ...basePack().table,
+        // `[(?<balance>]` is a character class matching one of those nine
+        // literal characters -- no capture group at all. The only REAL
+        // group here is `amount`.
+        rowTail: '(?<amount>[\\d,]+\\.\\d{2})[(?<balance>]\\s*$',
+      },
+    };
+    expect(validatePack(pack)).toBe(
+      'direction "balance-delta" requires a "balance" named group in table.rowTail',
+    );
+  });
+
+  it('is not fooled by a fake named group written after a backslash escape', () => {
+    const pack = {
+      ...basePack(),
+      table: {
+        ...basePack().table,
+        // `\(?<balance>` is an escaped literal "(" (optional) followed by
+        // literal text "<balance>" -- not a capture group.
+        rowTail: '(?<amount>[\\d,]+\\.\\d{2})\\(?<balance>\\s*$',
+      },
+    };
+    expect(validatePack(pack)).toBe(
+      'direction "balance-delta" requires a "balance" named group in table.rowTail',
+    );
   });
 
   it('rejects a rowTail missing the "amount" named group', () => {

@@ -29,15 +29,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Blanks out text that can't syntactically start a named group: the
+ * contents of a `[...]` character class (where `(?<balance>` is nothing
+ * but nine literal characters to match), and any character immediately
+ * following an unescaped `\` (an escaped `\(` is a literal paren, not a
+ * group open). Output is the same length as `source`, position for
+ * position, so it's safe to regex-scan afterward without shifting any real
+ * match's location. Not a full regex parser — just enough bracket/escape
+ * state to keep the group-name scan in `namedGroupsIn` honest.
+ */
+function stripNonGroupSyntax(source: string): string {
+  let out = '';
+  let inClass = false;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === '\\' && i + 1 < source.length) {
+      out += '  '; // neutralize both the escape and whatever it escapes
+      i += 1;
+      continue;
+    }
+    if (inClass) {
+      out += ch === ']' ? ']' : ' ';
+      if (ch === ']') inClass = false;
+      continue;
+    }
+    if (ch === '[') inClass = true;
+    out += ch;
+  }
+  return out;
+}
+
 /** Named capture groups declared in a regex SOURCE string. A literal scan
  * for `(?<name>` rather than a real parse — sufficient here since packs
  * write plain literal group names, never a name built from something that
- * could itself contain the `(?<` sequence. */
+ * could itself contain the `(?<` sequence — but the scan first runs over
+ * `stripNonGroupSyntax`'s output so a fake `(?<name>` sitting inside a
+ * character class or after a `\` escape can't be mistaken for a real one. */
 function namedGroupsIn(source: string): Set<string> {
   const names = new Set<string>();
   const re = /\(\?<([A-Za-z_$][\w$]*)>/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(source))) names.add(m[1]);
+  const sanitized = stripNonGroupSyntax(source);
+  while ((m = re.exec(sanitized))) names.add(m[1]);
   return names;
 }
 
@@ -229,6 +263,7 @@ export function detectPack(
 
 const MAX_LINE_LENGTH = 2000;
 const MAX_ROWS = 5000;
+const MAX_PAGES = 200;
 
 const MONTHS_3LETTER: Readonly<Record<string, number>> = {
   Jan: 0,
@@ -314,7 +349,12 @@ function parsePackDate(raw: string, format: PackDateFormat): string | null {
 }
 
 /** `[\d,]+\.\d{2}` shape, comma-stripped, to exact INTEGER CENTS — string
- * arithmetic only, so no float ever touches a money value. */
+ * arithmetic only, so no float ever touches a money value. Bounded to
+ * `Number.isSafeInteger`: an oversized digit run (a 17+-digit amount, or an
+ * enormous token that overflows to `Infinity`) would otherwise "verify" at
+ * confidence 1 as an imprecise double, or pass a balance-chain check via
+ * `Infinity === Infinity` — refusing through the existing unreadable-amount
+ * channel is honest about what wasn't actually read. */
 function parseAmountToCents(raw: string | undefined): number | null {
   if (raw === undefined) return null;
   if (!/^[\d,]+\.\d{2}$/.test(raw)) return null;
@@ -323,7 +363,8 @@ function parseAmountToCents(raw: string | undefined): number | null {
   const whole = stripped.slice(0, dot);
   const frac = stripped.slice(dot + 1);
   if (whole === '') return null;
-  return Number.parseInt(whole, 10) * 100 + Number.parseInt(frac, 10);
+  const cents = Number.parseInt(whole, 10) * 100 + Number.parseInt(frac, 10);
+  return Number.isSafeInteger(cents) ? cents : null;
 }
 
 interface CompiledTable {
@@ -406,14 +447,22 @@ function closeRow(
     return { ok: false, reason: `row ${openRow.ordinal} has an unreadable balance` };
   }
 
-  let type: TxType;
-  if (prevBalanceCents - amountCents === balanceCents) {
-    type = 'expense';
-  } else if (prevBalanceCents + amountCents === balanceCents) {
-    type = 'income';
-  } else {
-    return { ok: false, reason: `row ${openRow.ordinal} breaks the balance chain` };
+  // Computed as two independent predicates, not if/else-if: when amountCents
+  // is 0 and the balance is unchanged, BOTH are true, and an if/else-if
+  // would silently pick 'expense' — a guess at confidence 1. Both true and
+  // both false are different failures (ambiguous vs. broken), so they get
+  // different reasons.
+  const isExpense = prevBalanceCents - amountCents === balanceCents;
+  const isIncome = prevBalanceCents + amountCents === balanceCents;
+  if (isExpense === isIncome) {
+    return {
+      ok: false,
+      reason: isExpense
+        ? `row ${openRow.ordinal} has an ambiguous direction in the balance chain`
+        : `row ${openRow.ordinal} breaks the balance chain`,
+    };
   }
+  const type: TxType = isExpense ? 'expense' : 'income';
 
   let nextSerial = prevSerial;
   if (pack.verify.includes('serial-chain')) {
@@ -437,6 +486,37 @@ function closeRow(
   return { ok: true, row, nextBalanceCents: balanceCents, nextSerial };
 }
 
+type AdvanceResult =
+  | { ok: true; prevBalanceCents: number; prevSerial: number | null }
+  | { ok: false; reason: string };
+
+/**
+ * Closes `openRow`, pushes the resulting row (refusing past `MAX_ROWS`),
+ * and returns the chain state to carry into the next row. Shared by the
+ * same-line close (rowStart's own `rest`, rule 3) and the later-line close
+ * (a wrapped row's closing line, rule 4) — the two call sites were
+ * otherwise identical copies of this same close/push/bound/advance
+ * sequence, which is exactly the kind of pair a future fix could apply to
+ * one and silently miss in the other.
+ */
+function closeAndAdvance(
+  pack: StatementPack,
+  openRow: OpenRow,
+  match: RegExpExecArray,
+  text: string,
+  prevBalanceCents: number,
+  prevSerial: number | null,
+  rows: PackRow[],
+): AdvanceResult {
+  const closed = closeRow(pack, openRow, match, text, prevBalanceCents, prevSerial);
+  if (!closed.ok) return closed;
+  rows.push(closed.row);
+  if (rows.length > MAX_ROWS) {
+    return { ok: false, reason: `statement has more than ${MAX_ROWS} rows` };
+  }
+  return { ok: true, prevBalanceCents: closed.nextBalanceCents, prevSerial: closed.nextSerial };
+}
+
 /**
  * Runs a statement's per-page text through the pack's line grammar, then
  * verifies the closed rows' chains as it goes. See spec.ts's
@@ -449,6 +529,7 @@ export function parseStatement(pack: StatementPack, pages: readonly string[]): P
   const compiled = compileTable(pack.table);
   if (!compiled) return { ok: false, reason: 'pack table failed to compile' };
   if (pages.length === 0) return { ok: false, reason: 'no pages provided' };
+  if (pages.length > MAX_PAGES) return { ok: false, reason: 'statement has too many pages' };
 
   let tableStarted = false;
   let balanceSeeded = false;
@@ -520,14 +601,18 @@ export function parseStatement(pack: StatementPack, pages: readonly string[]): P
 
         const tailMatch = matchTailAtEnd(compiled.rowTail, rest);
         if (tailMatch) {
-          const closed = closeRow(pack, candidate, tailMatch, rest, prevBalanceCents, prevSerial);
-          if (!closed.ok) return closed;
-          rows.push(closed.row);
-          if (rows.length > MAX_ROWS) {
-            return { ok: false, reason: `statement has more than ${MAX_ROWS} rows` };
-          }
-          prevBalanceCents = closed.nextBalanceCents;
-          prevSerial = closed.nextSerial;
+          const advanced = closeAndAdvance(
+            pack,
+            candidate,
+            tailMatch,
+            rest,
+            prevBalanceCents,
+            prevSerial,
+            rows,
+          );
+          if (!advanced.ok) return advanced;
+          prevBalanceCents = advanced.prevBalanceCents;
+          prevSerial = advanced.prevSerial;
         } else {
           if (rest.trim()) candidate.fragments.push(rest.trim());
           openRow = candidate;
@@ -539,14 +624,18 @@ export function parseStatement(pack: StatementPack, pages: readonly string[]): P
       if (openRow) {
         const tailMatch = matchTailAtEnd(compiled.rowTail, line);
         if (tailMatch) {
-          const closed = closeRow(pack, openRow, tailMatch, line, prevBalanceCents, prevSerial);
-          if (!closed.ok) return closed;
-          rows.push(closed.row);
-          if (rows.length > MAX_ROWS) {
-            return { ok: false, reason: `statement has more than ${MAX_ROWS} rows` };
-          }
-          prevBalanceCents = closed.nextBalanceCents;
-          prevSerial = closed.nextSerial;
+          const advanced = closeAndAdvance(
+            pack,
+            openRow,
+            tailMatch,
+            line,
+            prevBalanceCents,
+            prevSerial,
+            rows,
+          );
+          if (!advanced.ok) return advanced;
+          prevBalanceCents = advanced.prevBalanceCents;
+          prevSerial = advanced.prevSerial;
           openRow = null;
         } else {
           if (line.trim()) openRow.fragments.push(line.trim());
