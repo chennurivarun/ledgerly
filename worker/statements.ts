@@ -771,7 +771,12 @@ async function persistStatementRun(
   model: string,
   now: string,
 ): Promise<StatementExtraction> {
-  const { rows: normalized } = normalizeStatementRows(
+  // `rawCapped` fires only when the RAW response blew past the 5000-row
+  // sanity bound — a real signal, not a hypothetical: a run that big is
+  // almost certainly malformed, and silently dropping the tail without
+  // marking the result truncated would be exactly the kind of quiet loss
+  // this pipeline exists to refuse.
+  const { rows: normalized, capped: rawCapped } = normalizeStatementRows(
     run.rows,
     settings.categories,
     STATEMENT_RAW_ROWS_BOUND,
@@ -844,7 +849,7 @@ async function persistStatementRun(
     })),
   );
 
-  const truncated = run.truncated || capped;
+  const truncated = run.truncated || rawCapped || capped;
   await saveJob(env.DB, {
     documentId,
     // 'partial' is the loud status: rows may be missing, and the UI says so.
@@ -1270,7 +1275,16 @@ export async function clientStatementRound(
   deps: CustomDeps = {},
 ): Promise<StatementPagesRoundResult> {
   await readDocumentRow(env.DB, documentId);
-  const { state } = await requireClientClaim(env.DB, documentId, readRunId(body));
+  const { job, state } = await requireClientClaim(env.DB, documentId, readRunId(body));
+  // A round is the custom-provider machinery specifically — a pack claim
+  // (provider 'pack', sprint 18) holds the SAME client-pages providerState
+  // shape (it needs the claim-visibility mechanics too) but has no rounds,
+  // no model, no key: a stray round against one must never fire a real AI
+  // call. Same readable 409 as no-claim-at-all — the caller has nothing to
+  // retry differently.
+  if (job.provider !== 'custom') {
+    throw new ApiFail(409, NO_CLIENT_READ_MESSAGE);
+  }
   const pages = validateRoundPages(body);
 
   const settings = await readSettings(env.DB);

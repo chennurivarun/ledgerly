@@ -191,7 +191,13 @@ describe('runPackRead', () => {
     vi.mocked(api.finalizeStatementPages).mockResolvedValue(settled);
 
     const labels: string[] = [];
-    const result = await runPackRead(DOC, [LONG_TEXT], (l) => labels.push(l), createCancelToken());
+    const result = await runPackRead(
+      DOC,
+      [LONG_TEXT],
+      false,
+      (l: string) => labels.push(l),
+      createCancelToken(),
+    );
 
     expect(detectPack).toHaveBeenCalledWith([LONG_TEXT], expect.any(Array));
     expect(parseStatement).toHaveBeenCalledWith(inKotakSavings, [LONG_TEXT]);
@@ -211,7 +217,7 @@ describe('runPackRead', () => {
   it('no bundled pack matches this bank → {outcome, reason: null}, no worker calls at all', async () => {
     vi.mocked(detectPack).mockReturnValue(null);
 
-    const result = await runPackRead(DOC, [LONG_TEXT], () => undefined, createCancelToken());
+    const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
 
     expect(result).toEqual({ outcome: 'no-pack', reason: null });
     expect(parseStatement).not.toHaveBeenCalled();
@@ -226,7 +232,7 @@ describe('runPackRead', () => {
       reason: 'row 12: balance chain broke',
     });
 
-    const result = await runPackRead(DOC, [LONG_TEXT], () => undefined, createCancelToken());
+    const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
 
     expect(result).toEqual({ outcome: 'no-pack', reason: 'row 12: balance chain broke' });
     expect(api.beginStatementPages).not.toHaveBeenCalled();
@@ -237,6 +243,7 @@ describe('runPackRead', () => {
     const result = await runPackRead(
       DOC,
       [LONG_TEXT, 'short'],
+      false,
       () => undefined,
       createCancelToken(),
     );
@@ -249,14 +256,84 @@ describe('runPackRead', () => {
   it('a cancellation between a verified parse and the claim throws WITHOUT an abort POST — nothing is claimed yet', async () => {
     vi.mocked(detectPack).mockReturnValue(inKotakSavings);
     vi.mocked(parseStatement).mockReturnValue({ ok: true, rows: [] });
+    vi.mocked(toStatementRowInputs).mockReturnValue([]);
     const token = createCancelToken();
     token.cancelled = true;
 
     await expect(
-      runPackRead(DOC, [LONG_TEXT], () => undefined, token),
+      runPackRead(DOC, [LONG_TEXT], false, () => undefined, token),
     ).rejects.toBeInstanceOf(ClientReadCancelled);
 
     expect(api.beginStatementPages).not.toHaveBeenCalled();
     expect(api.abortStatementPages).not.toHaveBeenCalled();
+  });
+
+  it('a truncated extraction that still verifies passes truncated through to finalize — a loud partial, never a silent "suggested"', async () => {
+    const rows = [packRow()];
+    const convertedRows = [{ merchant: 'converted-row' }];
+    vi.mocked(detectPack).mockReturnValue(inKotakSavings);
+    vi.mocked(parseStatement).mockReturnValue({ ok: true, rows });
+    vi.mocked(toStatementRowInputs).mockReturnValue(convertedRows);
+    vi.mocked(api.beginStatementPages).mockResolvedValue({ ok: true, runId: 'run-1' });
+    vi.mocked(api.finalizeStatementPages).mockResolvedValue({
+      documentId: DOC,
+      status: 'partial',
+    } as unknown as StatementExtraction);
+
+    await runPackRead(DOC, [LONG_TEXT], true, () => undefined, createCancelToken());
+
+    expect(api.finalizeStatementPages).toHaveBeenCalledWith(DOC, {
+      rows: convertedRows,
+      truncated: true,
+      runId: 'run-1',
+    });
+  });
+
+  describe('engine throws degrade to the ordinary "no pack" fallback (permanent defense, not a merge shim)', () => {
+    it('detectPack throwing → outcome no-pack, zero worker calls', async () => {
+      vi.mocked(detectPack).mockImplementation(() => {
+        throw new Error('malformed pack signature regex');
+      });
+
+      const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
+
+      expect(result).toEqual({ outcome: 'no-pack', reason: null });
+      expect(parseStatement).not.toHaveBeenCalled();
+      expect(api.beginStatementPages).not.toHaveBeenCalled();
+      expect(api.finalizeStatementPages).not.toHaveBeenCalled();
+      expect(api.abortStatementPages).not.toHaveBeenCalled();
+      expect(api.statementPagesRound).not.toHaveBeenCalled();
+    });
+
+    it('parseStatement throwing → outcome no-pack, zero worker calls', async () => {
+      vi.mocked(detectPack).mockReturnValue(inKotakSavings);
+      vi.mocked(parseStatement).mockImplementation(() => {
+        throw new Error('the state machine walked off the end of a line');
+      });
+
+      const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
+
+      expect(result).toEqual({ outcome: 'no-pack', reason: null });
+      expect(api.beginStatementPages).not.toHaveBeenCalled();
+      expect(api.finalizeStatementPages).not.toHaveBeenCalled();
+      expect(api.abortStatementPages).not.toHaveBeenCalled();
+    });
+
+    it('toStatementRowInputs throwing after a verified parse → outcome no-pack, zero worker calls (no claim to abort)', async () => {
+      vi.mocked(detectPack).mockReturnValue(inKotakSavings);
+      vi.mocked(parseStatement).mockReturnValue({ ok: true, rows: [packRow()] });
+      vi.mocked(toStatementRowInputs).mockImplementation(() => {
+        throw new Error('unexpected row shape');
+      });
+
+      const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
+
+      expect(result).toEqual({ outcome: 'no-pack', reason: null });
+      // The parse verified, but conversion runs BEFORE any claim is taken —
+      // so there is nothing to abort.
+      expect(api.beginStatementPages).not.toHaveBeenCalled();
+      expect(api.finalizeStatementPages).not.toHaveBeenCalled();
+      expect(api.abortStatementPages).not.toHaveBeenCalled();
+    });
   });
 });

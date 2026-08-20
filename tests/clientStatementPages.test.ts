@@ -681,6 +681,17 @@ describe('beginClientStatement — community pack claim', () => {
     );
     expect(tables.statement_extractions).toHaveLength(0);
   });
+
+  it('the packId path still gates on PDF mime — assertStatementMime runs for a pack claim too', async () => {
+    const { env, tables } = makeEnv({
+      settings: new Map([['aiProvider', JSON.stringify('off')]]),
+      documents: [{ id: DOC, mimeType: 'text/csv', objectKey: OBJECT_KEY, size: 10, pageCount: null }],
+    });
+    await expect(beginClientStatement(env, DOC, { packId: 'in.kotak.savings' })).rejects.toThrow(
+      /Transactions page/i,
+    );
+    expect(tables.statement_extractions).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -756,6 +767,15 @@ describe('clientStatementRound', () => {
     });
     await expect(
       clientStatementRound(sarvamRun.env, DOC, { pages: [textPage(0)] }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('409s against a pack claim — rounds are custom-provider machinery, never fired against a pack read', async () => {
+    const packClaim = roundEnv({
+      statement_extractions: [clientPendingJob({ provider: 'pack', model: 'in.kotak.savings' })],
+    });
+    await expect(
+      clientStatementRound(packClaim.env, DOC, { pages: [textPage(0)] }),
     ).rejects.toMatchObject({ status: 409 });
   });
 
@@ -946,6 +966,44 @@ describe('finalizeClientStatement', () => {
     expect(result.status).toBe('partial');
     expect(result.truncated).toBe(true);
     expect(result.rowCount).toBe(300);
+  });
+
+  it('the raw-response bound (5000) also marks the run truncated, even when the real 300-cap never fires', async () => {
+    // Isolates the OTHER cap: normalizeStatementRows' own `capped` signal at
+    // the 5000-row raw-response sanity bound used to be silently discarded,
+    // so a run whose raw response blew past it — but whose outstanding
+    // (post-confirmed-exclusion) list happened to land under 300 — reported
+    // 'suggested' as if nothing were missing, even though row 5001 was
+    // dropped before anyone ever looked at it.
+    const confirmed = Array.from({ length: 5000 }, (_, i) => ({
+      id: `row-confirmed-${i}`,
+      documentId: DOC,
+      idx: i,
+      fields: JSON.stringify({
+        date: { value: '2026-03-04', confidence: 0.9 },
+        merchant: { value: `M ${i}`, confidence: 0.9 }, // cleanBankDescriptor("m-i")
+        amount: { value: i + 1, confidence: 0.9 },
+        type: { value: 'expense', confidence: 0.9 },
+        category: { value: null, confidence: 0 },
+      }),
+      status: 'confirmed',
+      duplicate: 0,
+      lowestConfidence: 0.9,
+      createdAt: minutesAgo(30),
+    }));
+    const { env } = finalizeEnv({ statement_rows: confirmed });
+
+    // 5001 raw rows: normalizeStatementRows keeps only the first 5000
+    // (m-0..m-4999) under the raw bound — row 5000 (m-5000) never exists
+    // past that point. Every one of those first 5000 is already confirmed,
+    // so the real 300-cap never even triggers (outstanding is empty).
+    const rows = Array.from({ length: 5001 }, (_, i) => envelopeRow(`m-${i}`, i + 1));
+    const result = await finalizeClientStatement(env, DOC, { rows, truncated: false });
+
+    expect(result.status).toBe('partial');
+    expect(result.truncated).toBe(true);
+    expect(result.rowCount).toBe(5000); // 5000 confirmed kept, 0 fresh
+    expect(result.rows.filter((r) => r.status === 'proposed')).toHaveLength(0);
   });
 
   it('a >300-row statement advances past its first page once those rows are confirmed (cap-before-exclusion regression)', async () => {

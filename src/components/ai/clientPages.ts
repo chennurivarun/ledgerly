@@ -27,6 +27,7 @@
 import { api } from '../../api';
 import { detectPack, parseStatement, toStatementRowInputs } from '../../../shared/packs/engine';
 import { STATEMENT_PACKS } from '../../../shared/packs/registry';
+import type { PackParse, StatementPack } from '../../../shared/packs/spec';
 import {
   CLIENT_STATEMENT_MAX_PAGES,
   CLIENT_STATEMENT_PAGES_PER_ROUND,
@@ -219,16 +220,25 @@ async function renderPageToJpeg(page: PdfPage): Promise<string | null> {
 export interface ExtractedPages {
   pages: StatementPageInput[];
   /** Raw (unclipped) per-page text, in page order, 1:1 with the pages
-   * actually processed (up to CLIENT_STATEMENT_MAX_PAGES) — every page gets
-   * an entry here regardless of whether it ended up in `pages` as text or
-   * image. `pages`' own text content is clipped to the wire cap
+   * actually processed (up to CLIENT_STATEMENT_MAX_PAGES, or up to
+   * `bailedAtPage` under `textOnly`) — every page processed gets an entry
+   * here regardless of whether it ended up in `pages` as text or image.
+   * `pages`' own text content is clipped to the wire cap
    * (STATEMENT_PAGE_TEXT_MAX_CHARS); local pack detection needs the FULL
    * text layer, so it reads from here instead.
    */
   texts: string[];
   /** Pages were skipped (past the 100-page cap, or unrenderable) — the read
-   * must finalize as a loud partial. */
+   * must finalize as a loud partial. Independent of `bailedAtPage`: a bail
+   * is not a truncation (see below). */
   truncated: boolean;
+  /** Set only under `textOnly`, only when a page had no usable text layer
+   * (1-based) — extraction STOPPED there, rendering neither that page nor
+   * any later one. Not a truncation: a pack read is dead the moment one
+   * page lacks a text layer, so there is nothing to gain (and real canvas
+   * work to lose) by reading the rest of the PDF first. null when
+   * extraction ran every page it looked at. */
+  bailedAtPage: number | null;
 }
 
 /**
@@ -237,6 +247,15 @@ export interface ExtractedPages {
  * CLIENT_STATEMENT_MAX_PAGES pages; anything past that is reported as
  * truncation, never silently dropped. `runId` is null before any claim
  * exists (pack detection, sprint 18) — cancelling then needs no abort POST.
+ *
+ * `opts.textOnly` (sprint 18): for the 'auto' pack-detection path, where a
+ * single page with no text layer already kills the read (runPackRead
+ * refuses outright — see there) — so paying for a canvas render of that
+ * page, or of the scanned pages that would normally follow it, buys
+ * nothing. With `textOnly` set, extraction STOPS the moment it hits such a
+ * page (`renderPageToJpeg` is never called at all) and reports where via
+ * `bailedAtPage`. Without it (the default; 'ai-rounds' always omits it),
+ * behavior is unchanged — every page is read, images included.
  */
 export async function extractStatementPages(
   bytes: ArrayBuffer,
@@ -244,6 +263,7 @@ export async function extractStatementPages(
   token: CancelToken,
   documentId: string,
   runId: string | null,
+  opts: { textOnly?: boolean } = {},
 ): Promise<ExtractedPages> {
   const pdfjs = await loadPdfjs();
   const task = pdfjs.getDocument({ data: bytes });
@@ -254,6 +274,7 @@ export async function extractStatementPages(
     const pages: StatementPageInput[] = [];
     const texts: string[] = [];
     let truncated = total > cap;
+    let bailedAtPage: number | null = null;
 
     for (let i = 1; i <= cap; i++) {
       checkCancelled(token, documentId, runId);
@@ -265,6 +286,10 @@ export async function extractStatementPages(
         pages.push({ index: i - 1, kind: 'text', content: clipPageText(text) });
         continue;
       }
+      if (opts.textOnly) {
+        bailedAtPage = i;
+        break; // no render, no more pages — a pack read is already dead
+      }
       const image = await renderPageToJpeg(page);
       if (image === null) {
         truncated = true; // skipped, and finalize will say so
@@ -272,7 +297,7 @@ export async function extractStatementPages(
       }
       pages.push({ index: i - 1, kind: 'image', content: image });
     }
-    return { pages, texts, truncated };
+    return { pages, texts, truncated, bailedAtPage };
   } finally {
     void task.destroy().catch(() => undefined);
   }
@@ -400,10 +425,26 @@ async function runAiRoundsRead(
  * detect → parse → verify, entirely on the browser's own clock, no worker
  * call at all until a pack fully verifies. Any page with no usable text
  * layer refuses outright — a pack parse with holes is not a pack parse, so
- * that check runs before detection even starts. Nothing is claimed at the
- * worker until AFTER a verified parse, so a miss (no pack detected, or a
- * detected pack that could not verify) or a cancellation before that point
- * needs no abort — there is nothing yet to release.
+ * that check runs before detection even starts (runAutoRead's `textOnly`
+ * extraction already stops there for the real flow — this check is the
+ * defense-in-depth backstop for any other caller). Nothing is claimed at
+ * the worker until AFTER a verified, converted parse, so a miss (no pack
+ * detected, a detected pack that could not verify, or an engine THROW —
+ * see below) or a cancellation before that point needs no abort — there is
+ * nothing yet to release.
+ *
+ * The engine's three calls (detectPack, parseStatement, toStatementRowInputs)
+ * are each wrapped: a pack is community-contributed DATA (a regex grammar)
+ * driving a shared engine, and a bug in either must degrade to the ordinary
+ * "no pack" fallback — never crash the read outright and surface a raw
+ * engine error where the user expects "could not verify this bank" or a
+ * clean handoff to the configured AI provider. This is permanent defense,
+ * not a merge-sequencing shim.
+ *
+ * `truncated` carries forward whatever the extraction step already knows
+ * (the page-count cap, sprint 18) — a pack read that verified a TRUNCATED
+ * statement is still only a partial read and must settle 'partial', not
+ * 'suggested', same as every other provider.
  *
  * Split out from runAutoRead so the actual sprint-18 decision logic is
  * vitest-testable on its own: extractStatementPages needs pdf.js and a
@@ -414,6 +455,7 @@ async function runAiRoundsRead(
 export async function runPackRead(
   documentId: string,
   texts: readonly string[],
+  truncated: boolean,
   onProgress: (label: string) => void,
   token: CancelToken,
 ): Promise<ClientReadResult> {
@@ -422,23 +464,39 @@ export async function runPackRead(
     return { outcome: 'no-pack', reason: `page ${imagePageIndex + 1} has no text layer` };
   }
 
-  const pack = detectPack(texts, STATEMENT_PACKS);
+  let pack: StatementPack | null;
+  try {
+    pack = detectPack(texts, STATEMENT_PACKS);
+  } catch {
+    return { outcome: 'no-pack', reason: null };
+  }
   if (!pack) return { outcome: 'no-pack', reason: null };
 
-  const parse = parseStatement(pack, texts);
+  let parse: PackParse;
+  try {
+    parse = parseStatement(pack, texts);
+  } catch {
+    return { outcome: 'no-pack', reason: null };
+  }
   if (!parse.ok) return { outcome: 'no-pack', reason: parse.reason };
+
+  // Convert BEFORE claiming anything — a throw here is the same "engine bug,
+  // degrade gracefully" case as detectPack/parseStatement above, and doing
+  // it first means there is never a claim to release if it does throw.
+  let rows: unknown[];
+  try {
+    rows = toStatementRowInputs(parse.rows);
+  } catch {
+    return { outcome: 'no-pack', reason: null };
+  }
 
   checkCancelled(token, documentId, null);
   onProgress(`Reading with the ${pack.name} pack…`);
-  // Only NOW is anything claimed — a verified parse in hand.
+  // Only NOW is anything claimed — a verified, converted parse in hand.
   const { runId } = await api.beginStatementPages(documentId, pack.id);
   try {
     checkCancelled(token, documentId, runId);
-    return await api.finalizeStatementPages(documentId, {
-      rows: toStatementRowInputs(parse.rows),
-      truncated: false,
-      runId,
-    });
+    return await api.finalizeStatementPages(documentId, { rows, truncated, runId });
   } catch (err) {
     if (!(err instanceof ClientReadCancelled)) {
       // Same best-effort-abort discipline as the AI-rounds flow: the claim
@@ -450,10 +508,12 @@ export async function runPackRead(
 }
 
 /**
- * The pack-detection read (sprint 18): download → extract pages (KEEPING the
- * unclipped per-page text — the 20k clip on `pages` is a wire cap for the
- * AI-rounds round payload; local pack matching wants the full text layer) →
- * hand the text to runPackRead. Cancelling anywhere in here needs no abort —
+ * The pack-detection read (sprint 18): download → extract pages TEXT-ONLY
+ * (no canvas rendering — a pack read is dead the moment one page has no
+ * text layer, so extraction stops right there rather than paying for a
+ * render, of that page or any scanned page after it, that a pack could
+ * never use anyway) → hand the text (and the extraction's own truncation
+ * signal) to runPackRead. Cancelling anywhere in here needs no abort —
  * nothing is claimed until runPackRead's own begin call.
  */
 async function runAutoRead(
@@ -468,11 +528,17 @@ async function runAutoRead(
   const bytes = await res.arrayBuffer();
   checkCancelled(token, documentId, null);
 
-  const extracted = await extractStatementPages(bytes, onProgress, token, documentId, null);
+  const extracted = await extractStatementPages(bytes, onProgress, token, documentId, null, {
+    textOnly: true,
+  });
+  if (extracted.bailedAtPage !== null) {
+    // Not a truncation — a bail. No pack was even attempted.
+    return { outcome: 'no-pack', reason: `page ${extracted.bailedAtPage} has no text layer` };
+  }
   onProgress('Checking for a community pack…');
   checkCancelled(token, documentId, null);
 
-  return runPackRead(documentId, extracted.texts, onProgress, token);
+  return runPackRead(documentId, extracted.texts, extracted.truncated, onProgress, token);
 }
 
 /**
