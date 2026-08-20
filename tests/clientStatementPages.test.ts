@@ -14,6 +14,7 @@
 // payload.
 import { describe, expect, it } from 'vitest';
 import { txFingerprint } from '../shared/fingerprint';
+import { inKotakSavings } from '../shared/packs/packs/in-kotak-savings';
 import {
   CLIENT_STATEMENT_PAGES_PER_ROUND,
   STATEMENT_PAGE_IMAGE_MAX_BYTES,
@@ -689,6 +690,44 @@ describe('beginClientStatement — community pack claim', () => {
     });
     await expect(beginClientStatement(env, DOC, { packId: 'in.kotak.savings' })).rejects.toThrow(
       /Transactions page/i,
+    );
+    expect(tables.statement_extractions).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// begin — a USER-LOCAL pack claim (sprint 19): bundled + this user's own
+// distilled packs are one detection space, one lookup (anyStatementPackById)
+// ---------------------------------------------------------------------------
+
+describe('beginClientStatement — local pack claim (sprint 19)', () => {
+  const localPack = { ...inKotakSavings, id: 'in.my-local-bank.savings', name: 'My Local Bank' };
+
+  it('a packId that only exists in this user\'s localStatementPacks claims the job under provider "pack"', async () => {
+    const { env, tables } = makeEnv({
+      settings: new Map([
+        ['aiProvider', JSON.stringify('off')],
+        ['localStatementPacks', JSON.stringify([localPack])],
+      ]),
+    });
+    const begun = await beginClientStatement(env, DOC, { packId: 'in.my-local-bank.savings' });
+    expect(begun.ok).toBe(true);
+    const job = tables.statement_extractions[0];
+    expect(job.provider).toBe('pack');
+    expect(job.model).toBe('in.my-local-bank.savings');
+    const state = parseClientPagesState(job.providerState);
+    expect(state).toMatchObject({ v: 1, mode: 'client-pages', runId: begun.runId });
+  });
+
+  it('a packId belonging to nobody — not bundled, not in this user\'s local packs — still 400s', async () => {
+    const { env, tables } = makeEnv({
+      settings: new Map([
+        ['aiProvider', JSON.stringify('off')],
+        ['localStatementPacks', JSON.stringify([localPack])],
+      ]),
+    });
+    await expect(beginClientStatement(env, DOC, { packId: 'xx.nope.savings' })).rejects.toThrow(
+      /no community pack with that id ships in this build/i,
     );
     expect(tables.statement_extractions).toHaveLength(0);
   });

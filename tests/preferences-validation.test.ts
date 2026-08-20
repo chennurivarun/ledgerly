@@ -1,5 +1,7 @@
 // applyPreferences (worker/preferences.ts) validation for the sprint-2
-// `currency`/`onboarded` keys. Every other validator in that file is
+// `currency`/`onboarded` keys, plus the sprint-19 `localStatementPacks`
+// validator (the one place in this file the REAL engine's `validatePack` is
+// the subject under test, not a mock). Every other validator in that file is
 // exercised only indirectly (through the live API), since applyPreferences
 // needs a D1Database — this is the first test in the repo to give it one, so
 // the fake below is scoped tightly to the two things applyPreferences
@@ -7,6 +9,9 @@
 // writeSettings) and read the always-empty-here `tags`/`rules` tables
 // (readTags / readRules, called unconditionally at the end of every request).
 import { describe, expect, it } from 'vitest';
+import { LOCAL_PACK_MAX_BYTES, LOCAL_PACKS_MAX } from '../shared/packs/registry';
+import { inKotakSavings } from '../shared/packs/packs/in-kotak-savings';
+import type { StatementPack } from '../shared/packs/spec';
 import { applyPreferences } from '../worker/preferences';
 
 interface FakeStatement {
@@ -126,5 +131,96 @@ describe('applyPreferences — a rejected body writes nothing', () => {
       applyPreferences(db, { assetsTotal: 999, currency: 'NOPE' }),
     ).rejects.toMatchObject({ status: 400 });
     expect([...settingsRows.keys()]).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applyPreferences — localStatementPacks (sprint 19). validatePack here is
+// the REAL shared/packs/engine implementation, not a mock: this is the one
+// place in the repo that exercises the worker's wholesale reject-on-any-
+// failure discipline against the actual engine.
+// ---------------------------------------------------------------------------
+
+/** A structurally valid local pack, distinct from every bundled id. */
+function localPack(overrides: Partial<StatementPack> = {}): StatementPack {
+  return { ...structuredClone(inKotakSavings), id: 'in.my-bank.savings', name: 'My Bank', ...overrides };
+}
+
+describe('applyPreferences — localStatementPacks', () => {
+  it('a valid single pack round-trips through save and read-back', async () => {
+    const { db, settingsRows } = fakeDb();
+    const pack = localPack();
+    const res = await applyPreferences(db, { localStatementPacks: [pack] });
+    expect(res.settings.localStatementPacks).toEqual([pack]);
+    expect(settingsRows.has('localStatementPacks')).toBe(true);
+  });
+
+  it('rejects a non-array value', async () => {
+    const { db } = fakeDb();
+    await expect(
+      applyPreferences(db, { localStatementPacks: { not: 'an array' } }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it(`rejects more than ${LOCAL_PACKS_MAX} packs`, async () => {
+    const { db, settingsRows } = fakeDb();
+    const many = Array.from({ length: LOCAL_PACKS_MAX + 1 }, (_, i) =>
+      localPack({ id: `in.bank-${i}.savings` }),
+    );
+    await expect(applyPreferences(db, { localStatementPacks: many })).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(settingsRows.has('localStatementPacks')).toBe(false);
+  });
+
+  it('an invalid pack (a signature regex that fails to compile) 400s naming the index and the engine reason', async () => {
+    const { db } = fakeDb();
+    const bad = localPack({ signature: ['(unterminated'] });
+    await expect(applyPreferences(db, { localStatementPacks: [bad] })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(applyPreferences(db, { localStatementPacks: [bad] })).rejects.toThrow(
+      'Pack 1: signature entry must be a string that compiles as a RegExp',
+    );
+  });
+
+  it('rejects duplicate ids within the same list', async () => {
+    const { db } = fakeDb();
+    const dupe = [localPack(), localPack({ name: 'My Bank (again)' })];
+    await expect(applyPreferences(db, { localStatementPacks: dupe })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(applyPreferences(db, { localStatementPacks: dupe })).rejects.toThrow(
+      'Pack 2: id "in.my-bank.savings" is already used earlier in this list.',
+    );
+  });
+
+  it('rejects an id colliding with a bundled pack', async () => {
+    const { db } = fakeDb();
+    const collides = localPack({ id: 'in.kotak.savings' });
+    await expect(applyPreferences(db, { localStatementPacks: [collides] })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(applyPreferences(db, { localStatementPacks: [collides] })).rejects.toThrow(
+      'Pack 1: id "in.kotak.savings" collides with a bundled pack.',
+    );
+  });
+
+  it(`rejects a pack whose serialized size exceeds ${LOCAL_PACK_MAX_BYTES} bytes`, async () => {
+    const { db } = fakeDb();
+    const oversized = localPack({ name: 'x'.repeat(LOCAL_PACK_MAX_BYTES) });
+    await expect(applyPreferences(db, { localStatementPacks: [oversized] })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(applyPreferences(db, { localStatementPacks: [oversized] })).rejects.toThrow(
+      `Pack 1: exceeds ${LOCAL_PACK_MAX_BYTES} bytes serialized.`,
+    );
+  });
+
+  it('an empty list is valid and clears any previously saved packs', async () => {
+    const { db, settingsRows } = fakeDb({ localStatementPacks: [localPack()] });
+    const res = await applyPreferences(db, { localStatementPacks: [] });
+    expect(res.settings.localStatementPacks).toEqual([]);
+    expect(settingsRows.get('localStatementPacks')).toBe('[]');
   });
 });

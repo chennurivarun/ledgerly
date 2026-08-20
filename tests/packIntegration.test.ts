@@ -18,6 +18,7 @@ vi.mock('../src/api', () => ({
 import { api } from '../src/api';
 import { createCancelToken, runPackRead } from '../src/components/ai/clientPages';
 import { inKotakSavings } from '../shared/packs/packs/in-kotak-savings';
+import { STATEMENT_PACKS } from '../shared/packs/registry';
 import { generateSyntheticStatement } from './helpers/syntheticStatement';
 import type { StatementExtraction } from '../shared/types';
 
@@ -54,7 +55,14 @@ beforeEach(() => {
 describe('pack read end-to-end (real engine, real registry, real fixture)', () => {
   it('detects the Kotak pack, verifies, claims with its id, and finalizes converted rows', async () => {
     const labels: string[] = [];
-    const result = await runPackRead('doc-1', fixture(), false, (l) => labels.push(l), createCancelToken());
+    const result = await runPackRead(
+      'doc-1',
+      fixture(),
+      STATEMENT_PACKS,
+      false,
+      (l: string) => labels.push(l),
+      createCancelToken(),
+    );
 
     expect(result).toBe(SETTLED);
     expect(begin).toHaveBeenCalledWith('doc-1', inKotakSavings.id);
@@ -100,7 +108,7 @@ describe('pack read end-to-end (real engine, real registry, real fixture)', () =
       i === pages.length - 1 ? page.replace(/(\d)(\.\d{2})(?!.*\d\.\d{2})/s, (_, d, tail) => `${(Number(d) + 1) % 10}${tail}`) : page,
     );
 
-    const result = await runPackRead('doc-1', tampered, false, () => undefined, createCancelToken());
+    const result = await runPackRead('doc-1', tampered, STATEMENT_PACKS, false, () => undefined, createCancelToken());
 
     expect(result).toMatchObject({ outcome: 'no-pack' });
     expect((result as { reason: string | null }).reason).toMatch(/balance chain/);
@@ -111,7 +119,7 @@ describe('pack read end-to-end (real engine, real registry, real fixture)', () =
   });
 
   it('a truncated extraction settles the pack read as truncated (loud partial, never silent)', async () => {
-    await runPackRead('doc-1', fixture(), true, () => undefined, createCancelToken());
+    await runPackRead('doc-1', fixture(), STATEMENT_PACKS, true, () => undefined, createCancelToken());
     expect((finalize.mock.calls[0][1] as { truncated: boolean }).truncated).toBe(true);
   });
 });

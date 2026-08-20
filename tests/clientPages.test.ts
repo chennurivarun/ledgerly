@@ -196,12 +196,15 @@ describe('runPackRead', () => {
     const result = await runPackRead(
       DOC,
       [LONG_TEXT],
+      [inKotakSavings],
       false,
       (l: string) => labels.push(l),
       createCancelToken(),
     );
 
-    expect(detectPack).toHaveBeenCalledWith([LONG_TEXT], expect.any(Array));
+    // detectPack sees exactly the `packs` argument runPackRead was handed —
+    // pinned as the caller's array, not some module-level import.
+    expect(detectPack).toHaveBeenCalledWith([LONG_TEXT], [inKotakSavings]);
     expect(parseStatement).toHaveBeenCalledWith(inKotakSavings, [LONG_TEXT]);
     expect(toStatementRowInputs).toHaveBeenCalledWith(rows);
     // The claim is taken under the PACK's identity, never an AI provider's.
@@ -216,10 +219,33 @@ describe('runPackRead', () => {
     expect(result).toBe(settled);
   });
 
+  it('detection uses the `packs` param, not a hardcoded bundled list — a local-only pack detects', async () => {
+    // Not in the bundled registry at all: this pin fails if runPackRead ever
+    // goes back to importing STATEMENT_PACKS directly instead of using what
+    // the caller passed (sprint 19 — bundled + this user's local packs are
+    // one detection space, chosen by the CALLER, not this module).
+    const localPack = { ...inKotakSavings, id: 'in.my-local-bank.savings', name: 'My Local Bank' };
+    const localOnlyPacks = [localPack];
+    const rows = [packRow()];
+    const convertedRows = [{ merchant: 'converted-row' }];
+    const settled = { documentId: DOC, status: 'suggested' } as unknown as StatementExtraction;
+    vi.mocked(detectPack).mockReturnValue(localPack);
+    vi.mocked(parseStatement).mockReturnValue({ ok: true, rows });
+    vi.mocked(toStatementRowInputs).mockReturnValue(convertedRows);
+    vi.mocked(api.beginStatementPages).mockResolvedValue({ ok: true, runId: 'run-2' });
+    vi.mocked(api.finalizeStatementPages).mockResolvedValue(settled);
+
+    const result = await runPackRead(DOC, [LONG_TEXT], localOnlyPacks, false, () => undefined, createCancelToken());
+
+    expect(detectPack).toHaveBeenCalledWith([LONG_TEXT], localOnlyPacks);
+    expect(api.beginStatementPages).toHaveBeenCalledWith(DOC, 'in.my-local-bank.savings');
+    expect(result).toBe(settled);
+  });
+
   it('no bundled pack matches this bank → {outcome, reason: null}, no worker calls at all', async () => {
     vi.mocked(detectPack).mockReturnValue(null);
 
-    const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
+    const result = await runPackRead(DOC, [LONG_TEXT], [inKotakSavings], false, () => undefined, createCancelToken());
 
     expect(result).toEqual({ outcome: 'no-pack', reason: null });
     expect(parseStatement).not.toHaveBeenCalled();
@@ -234,7 +260,7 @@ describe('runPackRead', () => {
       reason: 'row 12: balance chain broke',
     });
 
-    const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
+    const result = await runPackRead(DOC, [LONG_TEXT], [inKotakSavings], false, () => undefined, createCancelToken());
 
     expect(result).toEqual({ outcome: 'no-pack', reason: 'row 12: balance chain broke' });
     expect(api.beginStatementPages).not.toHaveBeenCalled();
@@ -245,6 +271,7 @@ describe('runPackRead', () => {
     const result = await runPackRead(
       DOC,
       [LONG_TEXT, 'short'],
+      [inKotakSavings],
       false,
       () => undefined,
       createCancelToken(),
@@ -263,7 +290,7 @@ describe('runPackRead', () => {
     token.cancelled = true;
 
     await expect(
-      runPackRead(DOC, [LONG_TEXT], false, () => undefined, token),
+      runPackRead(DOC, [LONG_TEXT], [inKotakSavings], false, () => undefined, token),
     ).rejects.toBeInstanceOf(ClientReadCancelled);
 
     expect(api.beginStatementPages).not.toHaveBeenCalled();
@@ -282,7 +309,7 @@ describe('runPackRead', () => {
       status: 'partial',
     } as unknown as StatementExtraction);
 
-    await runPackRead(DOC, [LONG_TEXT], true, () => undefined, createCancelToken());
+    await runPackRead(DOC, [LONG_TEXT], [inKotakSavings], true, () => undefined, createCancelToken());
 
     expect(api.finalizeStatementPages).toHaveBeenCalledWith(DOC, {
       rows: convertedRows,
@@ -297,7 +324,7 @@ describe('runPackRead', () => {
         throw new Error('malformed pack signature regex');
       });
 
-      const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
+      const result = await runPackRead(DOC, [LONG_TEXT], [inKotakSavings], false, () => undefined, createCancelToken());
 
       expect(result).toEqual({ outcome: 'no-pack', reason: null });
       expect(parseStatement).not.toHaveBeenCalled();
@@ -313,7 +340,7 @@ describe('runPackRead', () => {
         throw new Error('the state machine walked off the end of a line');
       });
 
-      const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
+      const result = await runPackRead(DOC, [LONG_TEXT], [inKotakSavings], false, () => undefined, createCancelToken());
 
       expect(result).toEqual({ outcome: 'no-pack', reason: null });
       expect(api.beginStatementPages).not.toHaveBeenCalled();
@@ -328,7 +355,7 @@ describe('runPackRead', () => {
         throw new Error('unexpected row shape');
       });
 
-      const result = await runPackRead(DOC, [LONG_TEXT], false, () => undefined, createCancelToken());
+      const result = await runPackRead(DOC, [LONG_TEXT], [inKotakSavings], false, () => undefined, createCancelToken());
 
       expect(result).toEqual({ outcome: 'no-pack', reason: null });
       // The parse verified, but conversion runs BEFORE any claim is taken —

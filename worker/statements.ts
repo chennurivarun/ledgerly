@@ -7,7 +7,7 @@
 // whole statement says so instead of quietly returning less.
 import { cleanBankDescriptor } from '../shared/descriptors';
 import { txFingerprint } from '../shared/fingerprint';
-import { statementPackById } from '../shared/packs/registry';
+import { anyStatementPackById } from '../shared/packs/registry';
 import {
   CLIENT_STATEMENT_PAGES_PER_ROUND,
   MAX_FILE_BYTES,
@@ -1211,14 +1211,19 @@ export async function beginClientStatement(
   let provider: string;
   let model: string;
 
+  // Read once, ahead of the branch: a pack claim needs it too (bundled +
+  // this user's own local packs, sprint 19 — one detection space, one
+  // lookup) so the settings read moved here instead of living only in the
+  // AI-rounds branch below.
+  const settings = await readSettings(env.DB);
+
   if (packId !== null) {
-    const pack = statementPackById(packId);
+    const pack = anyStatementPackById(settings.localStatementPacks, packId);
     if (!pack) throw new ApiFail(400, UNKNOWN_PACK_MESSAGE);
     // A pack read needs NO AI provider — that is the point.
     provider = 'pack';
     model = pack.id;
   } else {
-    const settings = await readSettings(env.DB);
     ({ provider, model } = selectStatementProvider(settings));
     if (provider !== 'custom') {
       // Anthropic/Sarvam read the PDF themselves — their door is /extract.
