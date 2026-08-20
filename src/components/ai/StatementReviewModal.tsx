@@ -7,6 +7,7 @@ import { AlertTriangle, ExternalLink } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
 import { fmtDate, fmtSigned } from '../../../shared/format';
+import { statementPackById } from '../../../shared/packs/registry';
 import type {
   BatchInsertResult,
   DocumentMeta,
@@ -212,7 +213,13 @@ export function StatementReviewModal({
 
   const noAccounts = settings.accounts.length === 0;
   const noCategories = settings.categories.length === 0;
-  const providerLabel = PROVIDER_LABEL[statement.provider] ?? statement.provider;
+  // A community pack read (sprint 18) never shows the raw provider string
+  // 'pack' — its model IS the pack id, so the human name it ships with
+  // (statementPackById) is what the user sees, same as every AI provider.
+  const providerLabel =
+    statement.provider === 'pack'
+      ? (statementPackById(statement.model)?.name ?? statement.model)
+      : (PROVIDER_LABEL[statement.provider] ?? statement.provider);
   const previewUrl = `${api.documentDownloadUrl(doc.id)}?inline=1`;
 
   async function handleConfirm() {

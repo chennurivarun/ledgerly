@@ -1,9 +1,15 @@
-// The browser half of the statement-pages flow (sprint 16) — the pure,
-// DOM-free helpers: the text/image page heuristic, the round chunking, the
-// image-size gate, and the pinned progress copy. The canvas- and
-// pdf.js-dependent pieces are isolated behind these seams in the module
-// itself and exercised by the live smoke, not vitest.
-import { describe, expect, it } from 'vitest';
+// The browser half of the statement-pages flow (sprint 16, extended sprint
+// 18) — the pure, DOM-free helpers: the text/image page heuristic, the round
+// chunking, the image-size gate, and the pinned progress copy; plus
+// runPackRead, the sprint-18 pack-detection DECISION logic (detect → parse →
+// verify → claim-and-finalize), tested here against fed-in page text. The
+// canvas- and pdf.js-dependent pieces (extractStatementPages and everything
+// built on it — runAutoRead, runClientStatementRead's 'ai-rounds' mode) stay
+// isolated behind those seams and exercised by the live smoke, not vitest —
+// this file's own header has always drawn that line, and sprint 18 doesn't
+// move it: shared/packs/engine is mocked because its bodies are stubs that
+// throw (Lane A's own S18 contract), not because pdf.js became testable.
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chunkPages,
   clipPageText,
@@ -15,6 +21,7 @@ import {
   isTextPage,
   pagesProgressLabel,
   preparingLabel,
+  runPackRead,
   TEXT_PAGE_MIN_CHARS,
 } from '../src/components/ai/clientPages';
 import {
@@ -23,6 +30,34 @@ import {
   STATEMENT_PAGE_IMAGE_MAX_BYTES,
   STATEMENT_PAGE_TEXT_MAX_CHARS,
 } from '../shared/types';
+
+// shared/packs/engine's bodies are S18 stubs that throw — NEVER call them
+// for real here (Lane A owns the implementation); this pins the DECISION
+// LOGIC runPackRead wraps around them.
+vi.mock('../shared/packs/engine', () => ({
+  detectPack: vi.fn(),
+  parseStatement: vi.fn(),
+  toStatementRowInputs: vi.fn(),
+}));
+
+// The worker calls a verified pack read makes — mocked because this file has
+// no fetch/DOM harness, not because the module is untestable; runAutoRead's
+// download step is the untestable (pdf.js/canvas) part, and isn't under test
+// here.
+vi.mock('../src/api', () => ({
+  api: {
+    beginStatementPages: vi.fn(),
+    finalizeStatementPages: vi.fn(),
+    abortStatementPages: vi.fn(),
+    statementPagesRound: vi.fn(),
+  },
+}));
+
+import { api } from '../src/api';
+import { detectPack, parseStatement, toStatementRowInputs } from '../shared/packs/engine';
+import { inKotakSavings } from '../shared/packs/packs/in-kotak-savings';
+import type { PackRow } from '../shared/packs/spec';
+import type { StatementExtraction } from '../shared/types';
 
 describe('the text-page heuristic', () => {
   it('pins the threshold at 200 characters', () => {
@@ -111,5 +146,117 @@ describe('cancellation token', () => {
     const err = new ClientReadCancelled();
     expect(err).toBeInstanceOf(Error);
     expect(err.name).toBe('ClientReadCancelled');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runPackRead — the sprint-18 pack-detection decision: detect → parse →
+// verify → claim-and-finalize, given page text already in hand (the
+// pdf.js/canvas extraction step is out of vitest's reach — see the module
+// header — so these tests feed text directly, exactly what runAutoRead
+// hands runPackRead after extraction).
+// ---------------------------------------------------------------------------
+
+const DOC = 'doc-1';
+/** Well past the 200-char text-page threshold — never triggers the
+ * no-text-layer refusal by accident. */
+const LONG_TEXT = 'Statement line item text that is long enough to read as a real page. '.repeat(6);
+
+/** One chain-verified row, shaped exactly like the engine's real output. */
+function packRow(overrides: Partial<PackRow> = {}): PackRow {
+  return {
+    date: '2026-03-04',
+    description: 'ACH TRANSFER REF 12345',
+    amount: 500,
+    type: 'expense',
+    balance: 9500,
+    serial: 1,
+    ...overrides,
+  };
+}
+
+describe('runPackRead', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('a verified pack claims the read and finalizes with the converted rows — no rounds, ever', async () => {
+    const rows = [packRow()];
+    const convertedRows = [{ merchant: 'converted-row' }];
+    const settled = { documentId: DOC, status: 'suggested' } as unknown as StatementExtraction;
+    vi.mocked(detectPack).mockReturnValue(inKotakSavings);
+    vi.mocked(parseStatement).mockReturnValue({ ok: true, rows });
+    vi.mocked(toStatementRowInputs).mockReturnValue(convertedRows);
+    vi.mocked(api.beginStatementPages).mockResolvedValue({ ok: true, runId: 'run-1' });
+    vi.mocked(api.finalizeStatementPages).mockResolvedValue(settled);
+
+    const labels: string[] = [];
+    const result = await runPackRead(DOC, [LONG_TEXT], (l) => labels.push(l), createCancelToken());
+
+    expect(detectPack).toHaveBeenCalledWith([LONG_TEXT], expect.any(Array));
+    expect(parseStatement).toHaveBeenCalledWith(inKotakSavings, [LONG_TEXT]);
+    expect(toStatementRowInputs).toHaveBeenCalledWith(rows);
+    // The claim is taken under the PACK's identity, never an AI provider's.
+    expect(api.beginStatementPages).toHaveBeenCalledWith(DOC, 'in.kotak.savings');
+    expect(api.finalizeStatementPages).toHaveBeenCalledWith(DOC, {
+      rows: convertedRows,
+      truncated: false,
+      runId: 'run-1',
+    });
+    expect(api.statementPagesRound).not.toHaveBeenCalled();
+    expect(labels).toContain(`Reading with the ${inKotakSavings.name} pack…`);
+    expect(result).toBe(settled);
+  });
+
+  it('no bundled pack matches this bank → {outcome, reason: null}, no worker calls at all', async () => {
+    vi.mocked(detectPack).mockReturnValue(null);
+
+    const result = await runPackRead(DOC, [LONG_TEXT], () => undefined, createCancelToken());
+
+    expect(result).toEqual({ outcome: 'no-pack', reason: null });
+    expect(parseStatement).not.toHaveBeenCalled();
+    expect(api.beginStatementPages).not.toHaveBeenCalled();
+    expect(api.abortStatementPages).not.toHaveBeenCalled();
+  });
+
+  it('a matched pack that cannot verify propagates the structural reason, no claim taken', async () => {
+    vi.mocked(detectPack).mockReturnValue(inKotakSavings);
+    vi.mocked(parseStatement).mockReturnValue({
+      ok: false,
+      reason: 'row 12: balance chain broke',
+    });
+
+    const result = await runPackRead(DOC, [LONG_TEXT], () => undefined, createCancelToken());
+
+    expect(result).toEqual({ outcome: 'no-pack', reason: 'row 12: balance chain broke' });
+    expect(api.beginStatementPages).not.toHaveBeenCalled();
+    expect(api.abortStatementPages).not.toHaveBeenCalled();
+  });
+
+  it('any page with no usable text layer refuses before detection even runs, naming the page', async () => {
+    const result = await runPackRead(
+      DOC,
+      [LONG_TEXT, 'short'],
+      () => undefined,
+      createCancelToken(),
+    );
+
+    expect(result).toEqual({ outcome: 'no-pack', reason: 'page 2 has no text layer' });
+    expect(detectPack).not.toHaveBeenCalled();
+    expect(api.beginStatementPages).not.toHaveBeenCalled();
+  });
+
+  it('a cancellation between a verified parse and the claim throws WITHOUT an abort POST — nothing is claimed yet', async () => {
+    vi.mocked(detectPack).mockReturnValue(inKotakSavings);
+    vi.mocked(parseStatement).mockReturnValue({ ok: true, rows: [] });
+    const token = createCancelToken();
+    token.cancelled = true;
+
+    await expect(
+      runPackRead(DOC, [LONG_TEXT], () => undefined, token),
+    ).rejects.toBeInstanceOf(ClientReadCancelled);
+
+    expect(api.beginStatementPages).not.toHaveBeenCalled();
+    expect(api.abortStatementPages).not.toHaveBeenCalled();
   });
 });
