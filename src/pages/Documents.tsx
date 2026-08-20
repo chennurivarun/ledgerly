@@ -4,6 +4,7 @@ import { Download, ExternalLink, FileText, FolderSync, PackagePlus, Sparkles, Tr
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fmtDate } from '../../shared/format';
+import { DISTILL_MIN_ANCHORS } from '../../shared/packs/distill';
 import { allStatementPacks } from '../../shared/packs/registry';
 import {
   MAX_FILE_BYTES,
@@ -872,7 +873,10 @@ export default function Documents() {
                 ? statement.rows.filter((r) => r.status === 'confirmed').length
                 : 0;
               const showDistillAction =
-                isPdf && !!statement && statement.provider !== 'pack' && confirmedRowCount >= 3;
+                isPdf &&
+                !!statement &&
+                statement.provider !== 'pack' &&
+                confirmedRowCount >= DISTILL_MIN_ANCHORS;
               return (
                 <li key={doc.id} className="flex flex-wrap items-center gap-3 py-3">
                   <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">

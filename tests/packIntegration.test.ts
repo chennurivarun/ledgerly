@@ -18,7 +18,7 @@ vi.mock('../src/api', () => ({
 import { api } from '../src/api';
 import { createCancelToken, runPackRead } from '../src/components/ai/clientPages';
 import { inKotakSavings } from '../shared/packs/packs/in-kotak-savings';
-import { STATEMENT_PACKS } from '../shared/packs/registry';
+import { allStatementPacks, STATEMENT_PACKS } from '../shared/packs/registry';
 import { generateSyntheticStatement } from './helpers/syntheticStatement';
 import type { StatementExtraction } from '../shared/types';
 
@@ -121,5 +121,30 @@ describe('pack read end-to-end (real engine, real registry, real fixture)', () =
   it('a truncated extraction settles the pack read as truncated (loud partial, never silent)', async () => {
     await runPackRead('doc-1', fixture(), STATEMENT_PACKS, true, () => undefined, createCancelToken());
     expect((finalize.mock.calls[0][1] as { truncated: boolean }).truncated).toBe(true);
+  });
+
+  it('a local pack sharing a bundled pack\'s signature makes detection ambiguous through the REAL engine — refuses, never crashes, degrades to the ordinary no-pack fallback (never picks either one by guesswork)', async () => {
+    // Same signature as the bundled Kotak pack, different id — exactly what
+    // a user's own local pack could look like if their bank's layout happens
+    // to match a bundled one's detection strings. The engine's own rule
+    // (shared/packs/spec.ts: "no two packs match one document") fires
+    // identically whether both matches are bundled or one is local — the
+    // detection space is composed by allStatementPacks(local packs), same
+    // as the real Documents.tsx call site.
+    const localClone = { ...inKotakSavings, id: 'in.my-local-clone.savings', name: 'My Local Clone' };
+
+    const result = await runPackRead(
+      'doc-1',
+      fixture(),
+      allStatementPacks([localClone]),
+      false,
+      () => undefined,
+      createCancelToken(),
+    );
+
+    expect(result).toEqual({ outcome: 'no-pack', reason: null });
+    expect(begin).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+    expect(abort).not.toHaveBeenCalled();
   });
 });

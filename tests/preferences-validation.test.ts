@@ -223,4 +223,21 @@ describe('applyPreferences — localStatementPacks', () => {
     expect(res.settings.localStatementPacks).toEqual([]);
     expect(settingsRows.get('localStatementPacks')).toBe('[]');
   });
+
+  it('a mix of one valid and one invalid pack rejects the WHOLE list — the valid entry is not persisted either (pins the wholesale contract against a future incremental-accumulation refactor)', async () => {
+    const { db, settingsRows } = fakeDb();
+    const valid = localPack();
+    const invalid = localPack({ id: 'in.other-bank.savings', signature: ['(unterminated'] });
+    await expect(applyPreferences(db, { localStatementPacks: [valid, invalid] })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(applyPreferences(db, { localStatementPacks: [valid, invalid] })).rejects.toThrow(
+      'Pack 2: signature entry must be a string that compiles as a RegExp',
+    );
+    // Not "the invalid one was dropped" — NOTHING was written, not even the
+    // valid entry that validated fine on its own. No row at all, same as a
+    // totally untouched settings table.
+    expect(settingsRows.has('localStatementPacks')).toBe(false);
+    expect([...settingsRows.keys()]).toEqual([]);
+  });
 });
