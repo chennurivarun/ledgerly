@@ -7,6 +7,7 @@
 // whole statement says so instead of quietly returning less.
 import { cleanBankDescriptor } from '../shared/descriptors';
 import { txFingerprint } from '../shared/fingerprint';
+import { statementPackById } from '../shared/packs/registry';
 import {
   CLIENT_STATEMENT_PAGES_PER_ROUND,
   MAX_FILE_BYTES,
@@ -1166,24 +1167,58 @@ export async function runStatementExtraction(
 // the one persistence pipeline every provider's rows go through at finalize.
 // ---------------------------------------------------------------------------
 
+/** Optional packId off a request body — absent (or non-string) means the
+ * plain AI-rounds begin. */
+function readPackId(body: unknown): string | null {
+  if (!isRecord(body)) return null;
+  return typeof body.packId === 'string' ? body.packId : null;
+}
+
+export const UNKNOWN_PACK_MESSAGE =
+  'No community pack with that id ships in this build. Reload the tab, then try again.';
+
 /**
- * POST /api/documents/:id/statement/pages/begin — the statement gates for
- * provider 'custom' (URL + model required, PDF mime), then the SAME claim
- * every other run takes, with a client-pages providerState parked so a
- * colliding read 409s and the S12 tick path knows to keep its hands off.
+ * POST /api/documents/:id/statement/pages/begin — two shapes.
+ *
+ * A packId claims a COMMUNITY PACK read (sprint 18): the browser already
+ * parsed and chain-verified the statement locally against a bundled pack, so
+ * this claim needs NO provider configured at all — the provider gate is
+ * skipped entirely and the job records provider 'pack' with the pack id as
+ * its model. An unknown packId is a readable 400 (almost certainly a stale
+ * bundle — the copy points at the cure), never a guess.
+ *
+ * No packId is the sprint-16 AI-rounds begin, byte-for-byte: the statement
+ * gates for provider 'custom' (URL + model required), same claim.
+ *
+ * Either way: PDF mime is required, and the claim/runId/providerState
+ * mechanics are shared — a colliding read 409s and the S12 tick path knows
+ * to keep its hands off.
  */
 export async function beginClientStatement(
   env: Env,
   documentId: string,
+  body: unknown = null,
 ): Promise<{ ok: true; runId: string }> {
   const doc = await readDocumentRow(env.DB, documentId);
-  const settings = await readSettings(env.DB);
   const now = new Date().toISOString();
 
-  const { provider, model } = selectStatementProvider(settings);
-  if (provider !== 'custom') {
-    // Anthropic/Sarvam read the PDF themselves — their door is /extract.
-    throw new ApiFail(400, 'This provider reads statements directly — use Read as statement.');
+  const packId = readPackId(body);
+  let provider: string;
+  let model: string;
+
+  if (packId !== null) {
+    const pack = statementPackById(packId);
+    if (!pack) throw new ApiFail(400, UNKNOWN_PACK_MESSAGE);
+    // A pack read needs NO AI provider — that is the point.
+    provider = 'pack';
+    model = pack.id;
+  } else {
+    const settings = await readSettings(env.DB);
+    ({ provider, model } = selectStatementProvider(settings));
+    if (provider !== 'custom') {
+      // Anthropic/Sarvam read the PDF themselves — their door is /extract.
+      throw new ApiFail(400, 'This provider reads statements directly — use Read as statement.');
+    }
   }
   assertStatementMime(doc.mimeType);
 

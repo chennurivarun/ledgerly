@@ -655,6 +655,35 @@ describe('beginClientStatement', () => {
 });
 
 // ---------------------------------------------------------------------------
+// begin — community pack claim (sprint 18): no AI provider needed at all
+// ---------------------------------------------------------------------------
+
+describe('beginClientStatement — community pack claim', () => {
+  it('a valid packId claims the job under provider "pack" — no AI provider configured', async () => {
+    const { env, tables } = makeEnv({
+      settings: new Map([['aiProvider', JSON.stringify('off')]]),
+    });
+    const begun = await beginClientStatement(env, DOC, { packId: 'in.kotak.savings' });
+    expect(begun.ok).toBe(true);
+    const job = tables.statement_extractions[0];
+    expect(job.provider).toBe('pack');
+    expect(job.model).toBe('in.kotak.savings');
+    const state = parseClientPagesState(job.providerState);
+    expect(state).toMatchObject({ v: 1, mode: 'client-pages', runId: begun.runId });
+  });
+
+  it('an unknown packId 400s with the reload copy, and takes no claim', async () => {
+    const { env, tables } = makeEnv({
+      settings: new Map([['aiProvider', JSON.stringify('off')]]),
+    });
+    await expect(beginClientStatement(env, DOC, { packId: 'xx.nope.savings' })).rejects.toThrow(
+      /no community pack with that id ships in this build/i,
+    );
+    expect(tables.statement_extractions).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // /statement/extract against a browser claim — the 409 pin, and the fresh-run
 // refusal
 // ---------------------------------------------------------------------------
