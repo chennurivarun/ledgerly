@@ -919,6 +919,48 @@ describe('finalizeClientStatement', () => {
     expect(result.rowCount).toBe(300);
   });
 
+  it('a >300-row statement advances past its first page once those rows are confirmed (cap-before-exclusion regression)', async () => {
+    // Live bug: normalizeStatementRows used to cap at MAX_STATEMENT_ROWS
+    // BEFORE confirmed-row exclusion, so re-running the same statement after
+    // importing its first 300 rows re-capped to that SAME first 300, excluded
+    // every one of them as already-confirmed, and proposed zero — a
+    // statement over 300 rows could never finish.
+    const { env, tables } = finalizeEnv();
+    const rows = Array.from({ length: 305 }, (_, i) => envelopeRow(`m-${i}`, i + 1));
+
+    const first = await finalizeClientStatement(env, DOC, { rows, truncated: false });
+    expect(first.status).toBe('partial');
+    expect(first.rowCount).toBe(300);
+    expect(tables.statement_rows).toHaveLength(300);
+
+    // The user imports everything proposed — mark those 300 rows confirmed,
+    // the same status confirmStatementRows leaves behind.
+    for (const row of tables.statement_rows) row.status = 'confirmed';
+
+    // A fresh browser-pages claim, as a real re-run would take.
+    tables.statement_extractions[0].status = 'pending';
+    tables.statement_extractions[0].providerState = JSON.stringify({
+      v: 1,
+      mode: 'client-pages',
+      beganAt: NOW_ISH(),
+    });
+
+    // Re-running the SAME 305 rows must not re-cap the same first 300 and
+    // exclude them all to zero — rows 300–304 must appear as freshly
+    // proposed, and the job must no longer report partial.
+    const second = await finalizeClientStatement(env, DOC, { rows, truncated: false });
+    expect(second.status).toBe('suggested');
+    expect(second.truncated).toBe(false);
+    expect(second.rowCount).toBe(305);
+    const proposed = second.rows.filter((r) => r.status === 'proposed');
+    expect(proposed).toHaveLength(5);
+    // cleanBankDescriptor title-cases the lone letter token ("m-300" → "M 300")
+    // — enrichment applies on both runs, so the assertion matches its output.
+    expect(proposed.map((r) => r.merchant.value).sort()).toEqual(
+      ['M 300', 'M 301', 'M 302', 'M 303', 'M 304'].sort(),
+    );
+  });
+
   it('zero rows → an honest failed job, never "0 proposed"; state cleared', async () => {
     const { env, tables } = finalizeEnv();
     const result = await finalizeClientStatement(env, DOC, { rows: [], truncated: true });
