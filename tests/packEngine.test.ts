@@ -339,6 +339,59 @@ describe('validatePack', () => {
     expect(validatePack([1, 2, 3])).not.toBeNull();
   });
 
+  // ReDoS gate (sprint 19): local packs made every pack regex USER-AUTHORED
+  // data the client executes — the catastrophic-backtracking shape (a
+  // repeated group whose body itself quantifies or alternates) is rejected
+  // at validation, which also armors the S20 community-PR CI for free.
+  describe('catastrophic-quantifier rejection', () => {
+    it('rejects the classic (a+)+ in a table regex, naming the field', () => {
+      const pack = basePack();
+      pack.table.furniture = ['^([0-9]+)+$'];
+      expect(validatePack(pack)).toBe(
+        'table.furniture entry must not repeat a quantified group (catastrophic backtracking risk)',
+      );
+    });
+
+    it('rejects a repeated alternation group (a|b)* in a signature', () => {
+      const pack = basePack();
+      pack.signature = ['^(Dr|Cr)*$'];
+      expect(validatePack(pack)).toBe(
+        'signature entry must not repeat a quantified group (catastrophic backtracking risk)',
+      );
+    });
+
+    it('rejects the nested-hidden form ((a+)?)* — marks propagate outward', () => {
+      const pack = basePack();
+      pack.table.headerLine = '^((x+)?)*$';
+      expect(validatePack(pack)).toBe(
+        'table.headerLine must not repeat a quantified group (catastrophic backtracking risk)',
+      );
+    });
+
+    it('rejects a brace-repeated quantified group (\\d+){2,}', () => {
+      const pack = basePack();
+      pack.table.rowTail =
+        '(?:^|\\s)(?<amount>[\\d,]+\\.\\d{2})\\s{2,}(?<balance>[\\d,]+\\.\\d{2})(\\d+){2,}$';
+      expect(validatePack(pack)).toBe(
+        'table.rowTail must not repeat a quantified group (catastrophic backtracking risk)',
+      );
+    });
+
+    it('keeps an OPTIONAL group containing a quantifier — (?:x+)? cannot repeat', () => {
+      const pack = basePack();
+      // An optional trailing column is a legitimate grammar shape.
+      pack.table.rowTail =
+        '(?:^|\\s)(?<amount>[\\d,]+\\.\\d{2})\\s{2,}(?<balance>[\\d,]+\\.\\d{2})(?:\\s+\\S+)?$';
+      expect(validatePack(pack)).toBeNull();
+    });
+
+    it('a quantifier-in-class is literal text, never the rejected shape', () => {
+      const pack = basePack();
+      pack.table.furniture = ['^[+*]+ notes$'];
+      expect(validatePack(pack)).toBeNull();
+    });
+  });
+
   it('rejects an unknown top-level key', () => {
     const pack = { ...basePack(), extra: true };
     expect(validatePack(pack)).toBe('unknown top-level key "extra"');

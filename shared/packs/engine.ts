@@ -84,6 +84,55 @@ function compilesAsRegExp(source: string): boolean {
   }
 }
 
+/**
+ * The classic catastrophic-backtracking shape: a QUANTIFIED group whose own
+ * body contains a top-level quantifier or alternation — `(a+)+`, `(a|b)*`,
+ * `(\d{2,})+` — where a non-matching input makes the JS regex engine explore
+ * exponentially many partitions. Local packs are user-authored regex data
+ * that the CLIENT executes on every statement read (sprint 19 widened this
+ * trust boundary; the worker never executes pack regexes — it only compares
+ * ids), so validatePack rejects the shape outright: every legitimate
+ * statement grammar (all bundled packs, every distiller template) quantifies
+ * only characters and classes, never groups-of-quantifiers. Heuristic, not a
+ * proof — an exotic pattern can still slip through and hang its author's own
+ * tab on their own instance, an accepted single-user ceiling documented in
+ * docs/PACKS.md. Runs over stripNonGroupSyntax output so classes/escapes
+ * can't fake or hide the shape.
+ */
+function hasCatastrophicQuantifier(source: string): boolean {
+  const s = stripNonGroupSyntax(source);
+  // Depth-tracked walk: a group is MARKED when its body carries a quantifier
+  // or alternation anywhere inside (marks propagate outward through nesting,
+  // so `((a+)?)*` cannot hide the inner `+` from the outer `*`). The
+  // rejected shape is a marked group closed by a REPEATING quantifier —
+  // `+`, `*`, or `{` — while `?` (0-or-1, cannot repeat) stays legal:
+  // `(?:\s(?<ref>\S+))?`, an optional trailing column, is a legitimate
+  // grammar the heuristic must not reject.
+  const marked: boolean[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '(') {
+      marked.push(false);
+      continue;
+    }
+    if (ch === ')') {
+      const wasMarked = marked.pop() ?? false;
+      const next = s[i + 1];
+      if (wasMarked && (next === '+' || next === '*' || next === '{')) {
+        return true;
+      }
+      // Whatever a group contained, its parent's body now contains too.
+      if (wasMarked && marked.length > 0) marked[marked.length - 1] = true;
+      continue;
+    }
+    if (marked.length === 0) continue;
+    if (ch === '+' || ch === '*' || ch === '|' || ch === '{') {
+      marked[marked.length - 1] = true;
+    }
+  }
+  return false;
+}
+
 const ID_RE = /^[a-z]{2}\.[a-z0-9-]+\.[a-z0-9-]+$/;
 const COUNTRY_RE = /^[a-z]{2}$/;
 const CURRENCY_RE = /^[A-Z]{3}$/;
@@ -197,6 +246,27 @@ export function validatePack(pack: unknown): PackValidationError | null {
   for (const entry of table.furniture) {
     if (typeof entry !== 'string' || !compilesAsRegExp(entry)) {
       return 'table.furniture entries must be strings that compile as a RegExp';
+    }
+  }
+
+  // ReDoS gate (sprint 19): local packs made pack regexes USER-AUTHORED
+  // data the client executes on every read, so every regex source in the
+  // pack — signature, table, furniture — must be free of the catastrophic
+  // shape. Checked once here, after the shape checks guaranteed everything
+  // is a compiling string.
+  const regexSources: [string, string][] = [
+    ...pack.signature.map((s): [string, string] => ['signature entry', s as string]),
+    ['table.headerLine', table.headerLine],
+    ...(table.openingBalanceLine !== undefined
+      ? [['table.openingBalanceLine', table.openingBalanceLine] as [string, string]]
+      : []),
+    ['table.rowStart', table.rowStart],
+    ['table.rowTail', table.rowTail],
+    ...table.furniture.map((s): [string, string] => ['table.furniture entry', s as string]),
+  ];
+  for (const [field, source] of regexSources) {
+    if (hasCatastrophicQuantifier(source)) {
+      return `${field} must not repeat a quantified group (catastrophic backtracking risk)`;
     }
   }
 
