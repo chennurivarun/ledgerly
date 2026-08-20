@@ -7,13 +7,23 @@
 // a draft StatementPack — then prove it, by running the REAL S18 engine on
 // the same pages and requiring a verified parse that matches the anchors.
 // The engine is the oracle: a draft that does not fully verify against the
-// very statement it came from is refused, never returned. A distilled pack
-// is layout knowledge ONLY — every regex the distiller emits comes from
-// fixed structural templates or from repeated LAYOUT lines with all money
-// tokens and 5+-digit runs generalized to pattern classes; statement
-// content (dates, amounts, descriptions, account numbers, names) never
-// survives into the output. `reason` strings are structural only, same
-// contract as the engine's.
+// very statement it came from is refused, never returned. Every regex the
+// distiller emits comes from fixed structural templates or from repeated
+// LAYOUT lines, generalized (money tokens, ALL digit runs, month
+// abbreviations, column gaps -> pattern classes). `reason` strings are
+// structural only, same contract as the engine's.
+//
+// Privacy is LAYERED, not a single guarantee (post-review, see
+// docs/PACKS.md's Distillation section for the full account): generalization
+// alone cannot tell a genuine column header from a person's name that
+// happens to repeat identically across pages — repetition proves nothing
+// about layout vs. content. A pure-word repeated line is excluded outright
+// (hasStructuralShape); the balance-chain seed additionally passes through
+// a small vocabulary allow-list (BALANCE_LABEL_VOCABULARY) and can never be
+// transaction-shaped itself. What's left after those gates still isn't
+// blindly trusted: every successful result carries `reviewables` — the
+// literal words that survived into the pack — for a human to confirm before
+// the pack ships. That confirmation step is load-bearing, not decorative.
 import type { TxType } from '../types';
 import type { PackDateFormat, PackRow, PackTableGrammar, PackVerification, StatementPack } from './spec';
 import { STATEMENT_PACK_SPEC } from './spec';
@@ -49,6 +59,17 @@ export type DistillResult =
       /** The proof the draft earned: the engine's verified row count on
        * these pages, and how many anchors matched a parsed row exactly. */
       proof: { rows: number; anchorsMatched: number; anchorsTotal: number };
+      /**
+       * EM-authorized S19 contract amendment (post-review, additive):
+       * every literal alphabetic run of length >=2 that survives into ANY
+       * of the pack's regexes (headerLine / furniture / signature /
+       * openingBalanceLine — rowStart/rowTail never carry statement text),
+       * deduplicated by text and tagged with the field it sits in. The
+       * machine cannot tell a layout label ("Balance", "Opening") from a
+       * person's name that happened to pass every structural gate —
+       * `reviewables` is the last line of defense: a human confirms the
+       * survivors before the pack ships. Empty when nothing survived. */
+      reviewables: { field: string; literalText: string }[];
     }
   | { ok: false; reason: string };
 
@@ -62,6 +83,25 @@ export const DISTILL_MIN_ANCHORS = 3;
  * below needs (date-format winner, repeated-line detection) — one pinned
  * number, not several independent magic constants. */
 export const DISTILL_MIN_ANCHOR_MATCH = 0.6;
+
+/** The only words a balance-chain seed line is allowed to carry (case-
+ * insensitive) once its money tokens are removed and it's generalized —
+ * layout labels a "Brought Forward" / "Opening Balance" style line
+ * legitimately prints. Anything else surviving there is presumed to be
+ * statement content (a merchant name, a note) and refuses the seed rather
+ * than risk shipping it. A PR can grow this list. */
+export const BALANCE_LABEL_VOCABULARY = [
+  'Opening',
+  'Balance',
+  'Brought',
+  'Forward',
+  'Carried',
+  'Previous',
+  'Statement',
+  'Total',
+  'B/F',
+  'C/F',
+] as const;
 
 // ---------------------------------------------------------------------------
 // Small local helpers. shared/packs/engine.ts doesn't export its internal
@@ -150,14 +190,38 @@ function escapeRegexLiteral(ch: string): string {
   return ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** PRIVACY-CRITICAL generalization (spec: header/furniture/openingBalance/
- * signature alike): escape the line literally except every money token ->
- * `[\d,]+\.\d{2}`, every run of 5+ digits -> `\d+`, runs of 2+ spaces ->
- * `\s{2,}`; anchored with `^`. When `target` is given, the FIRST occurrence
- * of that exact money-token substring (left-boundary checked so it can't be
- * a partial match inside a longer digit run) becomes a named group instead
- * of the generic money class — this is how openingBalanceLine's `balance`
- * group is produced. */
+/** Matches an English 3-letter month abbreviation only as a whole token —
+ * not as a prefix of a longer word (so "Jan" generalizes but "Jane" or
+ * "January" don't get truncated mid-word). */
+const MONTH_ABBR_RE = /^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?![A-Za-z])/;
+
+/** These are the fixed template substrings `generalizeLine` itself emits —
+ * never statement content. Used by `extractLiteralAlphaRuns` (the
+ * `reviewables` scan, below) to tell "our own regex syntax" apart from
+ * "text that survived generalization". Order doesn't matter: none is a
+ * substring of another, and none can appear inside escaped literal text
+ * (escapeRegexLiteral never emits a bare, unescaped backslash pairing). */
+const GENERALIZATION_TEMPLATE_TOKENS = ['[\\d,]+\\.\\d{2}', '\\d+', '\\s{2,}', '[A-Z][a-z]{2}'] as const;
+
+/**
+ * PRIVACY-CRITICAL generalization (spec: header/furniture/openingBalance/
+ * signature alike, post-review STRENGTHENED): escape the line literally
+ * except every money token -> `[\d,]+\.\d{2}`, every English month
+ * abbreviation -> `[A-Z][a-z]{2}`, every run of digits (ANY length, not
+ * just 5+ — a 2-digit day or a 4-digit year must die here too) -> `\d+`,
+ * and runs of 2+ spaces -> `\s{2,}`; anchored with `^`. When `target` is
+ * given, the FIRST occurrence of that exact money-token substring
+ * (left-boundary checked so it can't be a partial match inside a longer
+ * digit run) becomes a named group instead of the generic money class —
+ * this is how openingBalanceLine's `balance` group is produced.
+ *
+ * This alone is NOT the privacy boundary — see docs/PACKS.md's
+ * Distillation section for the full layered model (structural exclusion of
+ * pure-word repeats, the balance-label vocabulary gate, and `reviewables`
+ * as the human-in-the-loop backstop). Generalization only guarantees that
+ * DATES and MONEY VALUES can't survive; arbitrary literal words (a name, a
+ * note) survive it just fine when nothing else excludes the line.
+ */
 function generalizeLine(line: string, target?: { value: string; name: string }): string {
   let out = '';
   let i = 0;
@@ -181,7 +245,13 @@ function generalizeLine(line: string, target?: { value: string; name: string }):
       i += money[0].length;
       continue;
     }
-    const digits = /^\d{5,}/.exec(rest);
+    const month = MONTH_ABBR_RE.exec(rest);
+    if (month) {
+      out += '[A-Z][a-z]{2}';
+      i += month[0].length;
+      continue;
+    }
+    const digits = /^\d+/.exec(rest);
     if (digits) {
       out += '\\d+';
       i += digits[0].length;
@@ -197,6 +267,53 @@ function generalizeLine(line: string, target?: { value: string; name: string }):
     i += 1;
   }
   return `^${out}`;
+}
+
+/** True when a generalized pattern carries at least one digit-run, money,
+ * or column-gap class — i.e. it has SOME structural shape beyond bare
+ * words. A pure-word line (a name, a title) never matches this: post-review
+ * fix for the repeated-personal-line critical — such lines are excluded
+ * outright from furniture and the signature-extra slot, since they're
+ * cosmetic for parsing (the oracle's chains never depend on them) but a
+ * real privacy risk when they happen to repeat across pages. */
+function hasStructuralShape(pattern: string): boolean {
+  return GENERALIZATION_TEMPLATE_TOKENS.some((token) => pattern.includes(token));
+}
+
+/** The literal alphabetic runs (length >=2) that survive in a generated
+ * regex SOURCE string, once our own template syntax — named-group opens
+ * and the fixed class tokens above — is stripped out. What's left is, by
+ * construction, statement text that made it through generalization: this
+ * is the `reviewables` scan. */
+function extractLiteralAlphaRuns(patternSource: string): string[] {
+  let stripped = patternSource.replace(/\(\?<[A-Za-z_$][\w$]*>/g, '');
+  for (const token of GENERALIZATION_TEMPLATE_TOKENS) {
+    stripped = stripped.split(token).join('');
+  }
+  return stripped.match(/[A-Za-z]{2,}/g) ?? [];
+}
+
+/** The `reviewables` a distilled pack ships with: every literal alphabetic
+ * run that survived into headerLine / furniture / signature /
+ * openingBalanceLine, deduplicated by text (first field it's seen in wins
+ * the attribution), in that fixed field-scan order for determinism.
+ * rowStart/rowTail are fixed templates — never scanned, never a source of
+ * statement content. */
+function collectReviewables(pack: StatementPack): { field: string; literalText: string }[] {
+  const seen = new Set<string>();
+  const out: { field: string; literalText: string }[] = [];
+  const scan = (field: string, source: string) => {
+    for (const run of extractLiteralAlphaRuns(source)) {
+      if (seen.has(run)) continue;
+      seen.add(run);
+      out.push({ field, literalText: run });
+    }
+  };
+  scan('headerLine', pack.table.headerLine);
+  for (const f of pack.table.furniture) scan('furniture', f);
+  for (const s of pack.signature) scan('signature', s);
+  if (pack.table.openingBalanceLine) scan('openingBalanceLine', pack.table.openingBalanceLine);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +361,27 @@ function detectDateFormat(pages: readonly string[], anchors: readonly DistillAnc
   const winners = passing.filter((s) => s.matched.length === maxCount);
   if (winners.length > 1) return { ok: false, reason: 'ambiguous' };
   return { ok: true, format: winners[0].format, matchedAnchors: winners[0].matched };
+}
+
+/** At least one `\d{2}/\d{2}/\d{4}`-shaped token anywhere in the pages
+ * whose day-position component (per `format`'s chirality) is >12 — a value
+ * only valid as a day, never as a month, so it disambiguates dd/MM from
+ * MM/dd independent of which anchors were given. */
+function hasTranspositionCorroboration(
+  pages: readonly string[],
+  format: 'dd/MM/yyyy' | 'MM/dd/yyyy',
+): boolean {
+  const re = /\d{2}\/\d{2}\/\d{4}/g;
+  const dayIndex = format === 'dd/MM/yyyy' ? 0 : 1;
+  for (const page of pages) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(page))) {
+      const parts = m[0].split('/');
+      if (Number.parseInt(parts[dayIndex], 10) > 12) return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -348,14 +486,33 @@ interface HeaderScore {
   avgDist: number;
 }
 
+/** A real table header has at least two column gaps — one gap could be
+ * coincidence (any two-word masthead line), but a header row's whole job is
+ * separating columns. Required regardless of proximity ranking (post-review
+ * fix: a repeated single-gap or no-gap line must never win the header
+ * slot). Counts occurrences of the `\s{2,}` template token in the
+ * generalized pattern. */
+function hasHeaderShape(pattern: string): boolean {
+  let count = 0;
+  let idx = pattern.indexOf('\\s{2,}');
+  while (idx !== -1) {
+    count += 1;
+    if (count >= 2) return true;
+    idx = pattern.indexOf('\\s{2,}', idx + 1);
+  }
+  return false;
+}
+
 /** Ranks repeated patterns by how consistently they sit directly above the
- * first row-start candidate on a page — best (closest, most pages) first. */
+ * first row-start candidate on a page — best (closest, most pages) first.
+ * Only patterns with header shape (>=2 column gaps) are ranked at all. */
 function rankHeaderCandidates(
   repeated: ReadonlyMap<string, PatternInfo>,
   firstRowLineByPage: ReadonlyMap<number, number>,
 ): HeaderScore[] {
   const scored: HeaderScore[] = [];
   for (const [pattern, info] of repeated) {
+    if (!hasHeaderShape(pattern)) continue;
     const perPageBestDist = new Map<number, number>();
     for (const r of info.refs) {
       const firstRow = firstRowLineByPage.get(r.page);
@@ -372,20 +529,18 @@ function rankHeaderCandidates(
   return scored;
 }
 
-/** The one extra `signature` line beyond headerLine: repeated, not
- * page-1-only, contains real alphabetic content, and didn't collapse mostly
- * into `\d+` placeholders. */
+/** The one extra `signature` line beyond headerLine (post-review
+ * REPLACEMENT of the old "contains real alphabetic content" heuristic,
+ * which selected FOR the worst case — a repeated pure-word name line
+ * clears that bar easily). The new rule: the candidate must pass
+ * `hasStructuralShape` (excludes pure-word lines outright — same gate
+ * furniture uses), must already be in `repeated` (>=60% of pages, by
+ * construction of that map), and must not be page-1-only. No qualifying
+ * candidate -> signature is the header line alone. */
 function pickSignatureExtra(repeated: ReadonlyMap<string, PatternInfo>, headerPattern: string): string | null {
   const candidates = [...repeated.entries()]
-    .filter(([pattern]) => pattern !== headerPattern)
-    .filter(([, info]) => {
-      if (![...info.pages].some((p) => p !== 0)) return false; // page-1-only guard
-      const sample = info.refs[0].text;
-      if (!/[A-Za-z]{2,}/.test(sample)) return false;
-      const digitRunLen = (sample.match(/\d{5,}/g) ?? []).reduce((sum, s) => sum + s.length, 0);
-      if (sample.length > 0 && digitRunLen >= sample.length / 2) return false;
-      return true;
-    })
+    .filter(([pattern]) => pattern !== headerPattern && hasStructuralShape(pattern))
+    .filter(([, info]) => [...info.pages].some((p) => p !== 0)) // not page-1-only
     .sort((a, b) => {
       if (b[1].pages.size !== a[1].pages.size) return b[1].pages.size - a[1].pages.size;
       const aMin = Math.min(...a[1].refs.map((r) => r.globalIdx));
@@ -412,14 +567,9 @@ function buildRowStart(serial: boolean, format: PackDateFormat): string {
  * before the first anchor still opens via this same generic pattern once
  * the real engine runs, so the balance-chain seed (below) must precede
  * THIS line, not just the first anchored one. */
-function findGenericRowStartMatch(
-  flat: readonly FlatLine[],
-  serial: boolean,
-  format: PackDateFormat,
-): FlatLine | null {
-  const re = new RegExp(buildRowStart(serial, format));
+function findGenericRowStartMatch(flat: readonly FlatLine[], rowStartRe: RegExp): FlatLine | null {
   for (const fl of flat) {
-    if (re.test(fl.text)) return fl;
+    if (rowStartRe.test(fl.text)) return fl;
   }
   return null;
 }
@@ -498,7 +648,10 @@ interface Attempt {
 }
 
 /** A SMALL bounded candidate space (serial on/off, furniture subsets,
- * alternate header pick), capped at 12 attempts total. */
+ * alternate header pick). This construction yields at most 8 combinations
+ * today; the `add()` guard additionally caps at 12 as a hard ceiling so the
+ * space stays small even if more combinations are added later — comment
+ * and guard describe the same number on purpose. */
 function buildAttempts(
   baseSerial: boolean,
   headerPattern: string,
@@ -534,11 +687,21 @@ function buildAttempts(
  * malformed input — refusal is the only error channel.
  */
 export function distillStatementPack(
-  pages: readonly string[],
+  pagesInput: readonly string[],
   anchors: readonly DistillAnchor[],
   identity: DistillIdentity,
 ): DistillResult {
   try {
+    // CRLF/CR -> LF at the very entry, before anything reads a single
+    // character: a stray \r pollutes generalized patterns (mixed or
+    // consistent line endings across an extraction produce different
+    // "repeated" strings for what's visually the same line) and, left
+    // uncaught, can end up embedded literally in a rendered pack module —
+    // a raw LineTerminator inside a single-quoted TS string is a syntax
+    // error. Normalizing here means every stage downstream, INCLUDING the
+    // Stage 5 oracle call, works over the same clean text.
+    const pages = pagesInput.map((p) => p.replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
+
     // Stage 0 — gates.
     if (anchors.length < DISTILL_MIN_ANCHORS) {
       return { ok: false, reason: 'fewer than 3 confirmed rows to anchor on' };
@@ -547,9 +710,14 @@ export function distillStatementPack(
       if (pages[i].trim() === '') return { ok: false, reason: `page ${i + 1} has no readable text` };
     }
     if (!identityValid(identity)) return { ok: false, reason: 'the pack identity is invalid' };
+    // Every structural signal past this point (header, furniture, the
+    // opening-balance seed) is found by REPETITION across pages — a single
+    // page has nothing to repeat against, so distillation can't work yet.
+    if (pages.length < 2) {
+      return { ok: false, reason: 'a single-page statement cannot be distilled yet' };
+    }
 
     const totalPages = pages.length;
-    if (totalPages === 0) return { ok: false, reason: 'no consistent date format found' };
     const flat = flattenPages(pages);
 
     // Stage 1 — date format.
@@ -561,6 +729,19 @@ export function distillStatementPack(
       };
     }
     const { format, matchedAnchors } = dateResult;
+
+    // dd/MM/yyyy and MM/dd/yyyy share one digit shape (\d{2}/\d{2}/\d{4}) —
+    // when every corroborating date has both components <=12, the whole
+    // statement could in principle be re-read under the opposite chirality
+    // without a single invalid calendar value appearing. Require at least
+    // one date-shaped token ANYWHERE in the text (not just among anchors)
+    // whose day-component, under the WINNING format, exceeds 12 — a value
+    // that position could only hold under this chirality, never the other.
+    if (format === 'dd/MM/yyyy' || format === 'MM/dd/yyyy') {
+      if (!hasTranspositionCorroboration(pages, format)) {
+        return { ok: false, reason: 'date format is ambiguous' };
+      }
+    }
 
     // Stage 2 — row anchoring.
     const rowStartCandidates = findRowStartCandidates(flat, matchedAnchors, format);
@@ -599,17 +780,37 @@ export function distillStatementPack(
     // nearest line carrying a money token — the seed candidate, exactly
     // where a real "Opening Balance" furniture line (or, structurally
     // equivalently, nothing at all before row 1) would sit.
-    const trueFirstRow = findGenericRowStartMatch(flat, serialPresent, format);
+    const genericRowStartRe = new RegExp(buildRowStart(serialPresent, format));
+    const trueFirstRow = findGenericRowStartMatch(flat, genericRowStartRe);
     if (!trueFirstRow) return { ok: false, reason: 'no opening balance line found' };
     const openingFound = findNearestMoneyToken(flat, trueFirstRow.globalIdx);
     if (!openingFound) return { ok: false, reason: 'no opening balance line found' };
+
+    // Post-review layered fix for the seed-line leak: (b) a line that is
+    // itself transaction-shaped can never be the seed — it would mean an
+    // ordinary row's own content (merchant text, its own date) becomes the
+    // "layout" pattern. (c) even a non-row-shaped line is only trustworthy
+    // once its money token is set aside and everything else that survives
+    // generalization is drawn from a small closed vocabulary of balance
+    // labels — anything else (a name, a note, "REFUND") refuses rather
+    // than risk shipping it.
+    if (genericRowStartRe.test(openingFound.ref.text)) {
+      return { ok: false, reason: 'no opening balance line found' };
+    }
+    const withoutMoney = openingFound.ref.text.replace(/[\d,]+\.\d{2}/g, ' ');
+    const survivingWords = withoutMoney.match(/[A-Za-z]+(?:\/[A-Za-z]+)*/g) ?? [];
+    const vocabulary = new Set(BALANCE_LABEL_VOCABULARY.map((w) => w.toLowerCase()));
+    if (survivingWords.some((w) => !vocabulary.has(w.toLowerCase()))) {
+      return { ok: false, reason: 'no opening balance line found' };
+    }
+
     const openingBalanceLinePattern = generalizeLine(openingFound.ref.text, {
       value: openingFound.token,
       name: 'balance',
     });
 
     const furnitureFull = [...repeated.entries()]
-      .filter(([pattern]) => pattern !== headerPattern)
+      .filter(([pattern]) => pattern !== headerPattern && hasStructuralShape(pattern))
       .sort((a, b) => Math.min(...a[1].refs.map((r) => r.globalIdx)) - Math.min(...b[1].refs.map((r) => r.globalIdx)))
       .slice(0, 8)
       .map(([pattern]) => pattern);
@@ -634,7 +835,12 @@ export function distillStatementPack(
       if (!parsed.ok) continue;
       const matched = matchAnchors(parsed.rows, anchors);
       if (matched / anchors.length >= DISTILL_MIN_ANCHOR_MATCH) {
-        return { ok: true, pack, proof: { rows: parsed.rows.length, anchorsMatched: matched, anchorsTotal: anchors.length } };
+        return {
+          ok: true,
+          pack,
+          proof: { rows: parsed.rows.length, anchorsMatched: matched, anchorsTotal: anchors.length },
+          reviewables: collectReviewables(pack),
+        };
       }
     }
     return { ok: false, reason: 'the draft pack could not verify against this statement' };
@@ -659,8 +865,22 @@ function camelCaseFromId(id: string): string {
   return [country, ...capitalized].join('');
 }
 
+/** Single-quoted TS string literal, safe for ANY input — including
+ * identity fields (free text a user typed) and, post-review, any pattern
+ * that survived page normalization with an embedded LineTerminator
+ * anyway. A raw \n, \r, U+2028, or U+2029 inside a single-quoted JS/TS
+ * string literal is a SYNTAX ERROR (only template literals allow them
+ * unescaped), so all four are escaped alongside the backslash/quote pair —
+ * this is what keeps the rendered module a compilable file rather than a
+ * "usually works" one. */
 function tsString(s: string): string {
-  return `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  return `'${s
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029')}'`;
 }
 
 function serializeValue(value: unknown, indent: number): string {

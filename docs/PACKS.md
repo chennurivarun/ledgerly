@@ -223,7 +223,7 @@ function distillStatementPack(
   pages: readonly string[],
   anchors: readonly DistillAnchor[], // { date, amount, type } — no merchant text
   identity: DistillIdentity,          // { id, name, country, currency } — UI-supplied
-): DistillResult; // { ok: true, pack, proof } | { ok: false, reason }
+): DistillResult; // { ok: true, pack, proof, reviewables } | { ok: false, reason }
 
 function renderPackModule(pack: StatementPack): string; // the downloadable .ts file
 ```
@@ -232,14 +232,23 @@ An anchor is deliberately thin: date, amount, and direction only — no
 merchant text (review-time cleaning means it no longer matches the printed
 descriptor anyway) and no page/line position. At least `DISTILL_MIN_ANCHORS`
 (3) are required; fewer refuses outright, since inference needs ground truth
-to work from.
+to work from. Because everything past date-format detection works by
+**repetition across pages**, a single-page statement refuses outright too
+("a single-page statement cannot be distilled yet") — there's nothing to
+repeat against yet.
 
 ### How it infers a draft
 
 1. **Date format.** Each anchor's ISO date is rendered in every
    `PackDateFormat` and checked against the pages; the format whose
    renderings appear for at least `DISTILL_MIN_ANCHOR_MATCH` (60%) of anchors
-   wins. No qualifying format, or a tie for the win, refuses.
+   wins. No qualifying format, or a tie for the win, refuses. For the two
+   slash-separated formats (`dd/MM/yyyy`, `MM/dd/yyyy`, sharing one digit
+   shape), the winner additionally needs **corroboration**: at least one
+   date-shaped token anywhere in the pages whose day-component, under the
+   winning chirality, exceeds 12 — a value only valid as a day, never a
+   month, proving the statement can't be silently re-read the other way.
+   Absent that, "date format is ambiguous".
 2. **Row anchoring.** Lines containing a winning-format anchor rendering are
    candidate row starts. Whether they're consistently preceded by a serial
    number (`^\d+\s{2,}` before the date) decides whether the drafted grammar
@@ -252,27 +261,22 @@ to work from.
    - `rowStart` / `rowTail` come from a small per-date-format template table,
      the same shape as the bundled reference pack.
    - `headerLine` is the line that repeats (after generalization, below) on
-     at least 60% of pages and sits closest above a page's first candidate
-     row.
+     at least 60% of pages, has at least two column gaps (a real table
+     header separates columns; a coincidental one-gap masthead line never
+     qualifies), and sits closest above a page's first candidate row.
    - `openingBalanceLine` seeds the balance chain. Because the engine seeds
      it exactly once, before any row opens, the seed must sit above the
      statement's **true** first row — not just the first anchored one, since
      unanchored rows earlier in the statement still open under the same
      generic grammar once the real engine runs. The distiller locates that
      true first row generically, then walks backward to the nearest line
-     carrying a money token.
-   - `furniture` is every other 60%-repeated generalized line, capped at 8.
+     carrying a money token — subject to the seed-line safeguards below.
+   - `furniture` is every other 60%-repeated generalized line that also
+     clears the structural-shape gate below, capped at 8.
    - `signature` is the generalized header line, plus — when one exists — one
-     more repeated, non-page-1-only line with real alphabetic content.
+     more 60%-repeated, non-page-1-only line that also clears the
+     structural-shape gate.
 
-   **Generalization is what keeps a distilled pack privacy-safe**: every
-   selected line is escaped literally except money tokens (→
-   `[\d,]+\.\d{2}`), runs of 5+ digits (→ `\d+` — account numbers, CRNs,
-   phone numbers never survive), and runs of 2+ spaces (→ `\s{2,}`). A line
-   that never gets selected (not repeated, not the balance seed) never
-   appears in the pack at all — this is how a masthead name or account
-   number sitting next to a genuinely repeating header line stays out of the
-   output.
 5. **The proof.** The assembled candidate must pass `validatePack`, then
    `parseStatement` must verify against `pages`. Parsed rows are matched
    against anchors by exact date + cents-exact amount + type (each parsed
@@ -280,7 +284,7 @@ to work from.
    match — not all of them, since a user's review-time edit can legitimately
    diverge from the printed truth. A first-candidate failure retries a small
    bounded space (serial on/off, smaller furniture subsets, an alternate
-   header pick — capped at 12 total attempts) before refusing.
+   header pick) before refusing.
 
 A successful distillation typically **reads more than it was given**:
 anchors only need to cover a representative slice of a statement (the
@@ -291,7 +295,66 @@ drafted grammar is generic across dates, so `proof.rows` commonly exceeds
 Refusal reasons follow the same structural-only contract as the engine's:
 never a date, amount, description, or account number — always a shape
 ("no repeating table header found", "no running balance column found — the
-v1 pack format needs one").
+v1 pack format needs one", "a single-page statement cannot be distilled
+yet").
+
+### The privacy model — layered, not a single guarantee
+
+An earlier version of this section claimed generalization alone kept a
+distilled pack privacy-safe. An adversarial review found that false: a
+person's name that happens to repeat identically on every page (a statement
+holder's name in a running masthead is a real, common layout) sails through
+a "repeated, ≥60%-of-pages" check exactly like a genuine column header does
+— repetition proves nothing about whether a line is LAYOUT or CONTENT. What
+actually protects a distilled pack is four independent layers, and it's
+worth naming what each one does and doesn't cover:
+
+1. **Strengthened generalization.** Every candidate line has ALL digit runs
+   (any length — not just 5+, so a 2-digit day and a 4-digit year both die
+   here too) turned into `\d+`, English month abbreviations into
+   `[A-Z][a-z]{2}`, money tokens into their class, and 2+-space runs into
+   `\s{2,}`. This guarantees dates and money values never survive as
+   literal text. It says nothing about literal WORDS — "Balance", "Opening",
+   and a person's surname generalize identically (none of them are digits).
+2. **Structural exclusion.** A candidate line — for furniture or the
+   signature's extra slot — must carry at least one surviving `\d+`, money
+   class, or `\s{2,}` gap once generalized. A **pure-word** repeated line
+   (a name, a title) is excluded outright, unconditionally, regardless of
+   how many pages it repeats on. This costs nothing the engine's own oracle
+   depends on: such lines are cosmetic for parsing (mid-row interruptions
+   only ever pollute a description, never a chain), so dropping them is
+   free. This is what actually stops a repeated masthead name from becoming
+   furniture or signature.
+3. **The balance-label vocabulary gate.** `openingBalanceLine` is a special
+   case — it's the one line allowed to carry a NAMED capture group, so it
+   needs its own, stricter check. Once its money token is set aside, every
+   remaining alphabetic word must belong to `BALANCE_LABEL_VOCABULARY`
+   (`Opening`, `Balance`, `Brought`, `Forward`, `Carried`, `Previous`,
+   `Statement`, `Total`, `B/F`, `C/F` — a small, PR-extensible allow-list).
+   A line that's ALSO shaped like an ordinary transaction row is refused
+   outright before the vocabulary check even runs — an ordinary row's own
+   content can never become the seed line, full stop.
+4. **`reviewables` — the human-in-the-loop backstop.** Layers 1–3 are
+   structural; none of them can tell a genuine layout label from a person's
+   name that happens to ALSO pass every gate (a short, all-caps word that
+   coincidentally repeats, or sits directly above a table by coincidence in
+   a hand-crafted layout). The machine doesn't get to decide that call. A
+   successful `distillStatementPack` result carries `reviewables: {
+   field, literalText }[]` — every literal alphabetic run (length ≥2) that
+   survived into `headerLine`, `furniture`, `signature`, or
+   `openingBalanceLine` (`rowStart`/`rowTail` are fixed templates and never
+   carry statement text, so they're never scanned), deduplicated by text.
+   This is not a filter — it's a manifest. The host UI shows it and asks a
+   person to confirm before the pack ever reaches the commons.
+
+None of these layers is sufficient alone; together, a name has to survive
+generalization (trivial), clear the structural-shape gate (only if it's
+non-page-1-only AND happens to sit next to digits or a column gap on the
+SAME line, or IS the header/opening-balance line's own text, which the
+vocabulary gate catches separately), and then still get past a person
+actually reading `reviewables`. That is the honest claim this format makes:
+distillation minimizes what a human has to check, not what a human has to
+trust blindly.
 
 ### The downloadable module
 
