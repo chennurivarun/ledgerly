@@ -524,6 +524,18 @@ export interface StatementPageInput {
   content: string;
 }
 
+/**
+ * POST .../statement/pages/begin body (optional — an absent body is the
+ * plain AI-rounds begin). A valid packId claims the read for a COMMUNITY
+ * PACK (sprint 18): the browser parsed and chain-verified the statement
+ * locally with a bundled pack, no AI is involved, and the claim needs no
+ * provider configured — the job records provider 'pack' with the pack id
+ * as its model. An unknown packId is a readable 400, never a guess.
+ */
+export interface StatementPagesBeginInput {
+  packId?: string;
+}
+
 /** POST .../statement/pages/round body. */
 export interface StatementPagesRoundInput {
   pages: StatementPageInput[];
