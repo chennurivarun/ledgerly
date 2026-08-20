@@ -1,9 +1,11 @@
 // Documents page (spec §14) — upload + Drive inbox status + vault list.
 // objectKey is never rendered; no encryption claims are made anywhere here.
-import { Download, ExternalLink, FileText, FolderSync, Sparkles, Trash2 } from 'lucide-react';
+import { Download, ExternalLink, FileText, FolderSync, PackagePlus, Sparkles, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fmtDate } from '../../shared/format';
+import { DISTILL_MIN_ANCHORS } from '../../shared/packs/distill';
+import { allStatementPacks } from '../../shared/packs/registry';
 import {
   MAX_FILE_BYTES,
   type DocumentMeta,
@@ -38,6 +40,7 @@ import {
   providerCanReadPdfStatements,
 } from '../components/ai/preflightHelpers';
 import { resumableStatementIds, statementProgressLabel } from '../components/ai/statementHelpers';
+import { DistillPackModal } from '../components/ai/DistillPackModal';
 import { StatementReviewModal } from '../components/ai/StatementReviewModal';
 import { InboxConfirmModal } from '../components/inbox/InboxConfirmModal';
 import { InboxSection } from '../components/inbox/InboxSection';
@@ -155,6 +158,7 @@ export default function Documents() {
   const customBaseUrl = useStore((s) => s.settings.customBaseUrl);
   const aiModel = useStore((s) => s.settings.aiModel);
   const emailFeedEnabled = useStore((s) => s.settings.emailFeedEnabled);
+  const localStatementPacks = useStore((s) => s.settings.localStatementPacks);
   const uploadDocuments = useStore((s) => s.uploadDocuments);
   const extractDocument = useStore((s) => s.extractDocument);
   const statementPreflight = useStore((s) => s.statementPreflight);
@@ -212,6 +216,11 @@ export default function Documents() {
   // The read's cancellation token — flipped by the vanish guard and by
   // unmount, at which point the flow itself POSTs the best-effort abort.
   const clientReadToken = useRef<CancelToken | null>(null);
+  // Distillation (sprint 19): a separate slot from `reviewing` — it isn't a
+  // review of AI-proposed rows, it's a standalone tool over an ALREADY
+  // confirmed statement. Holds the DocumentMeta by value, same reasoning as
+  // `preflight`, so the modal keeps targeting the document that opened it.
+  const [distilling, setDistilling] = useState<DocumentMeta | null>(null);
 
   const aiOn = aiProvider !== 'off';
   // A BYOK provider (Anthropic or Sarvam) without its stored key can't
@@ -311,6 +320,7 @@ export default function Documents() {
     try {
       return await runClientStatementRead(
         doc.id,
+        allStatementPacks(localStatementPacks),
         (label) => setClientRead({ id: doc.id, label }),
         token,
         mode,
@@ -401,8 +411,10 @@ export default function Documents() {
   useEffect(() => {
     // Paused for the preflight dialog too — it's a modal like the reviews,
     // and a poll-driven re-render would hand its ConfirmDialog a fresh
-    // onClose identity, re-running the frozen Modal's focus effect.
-    if (!hasPending || reviewing || preflight) return;
+    // onClose identity, re-running the frozen Modal's focus effect. Same for
+    // the distill modal (sprint 19): its own vault download + extraction
+    // shouldn't race a background refresh either.
+    if (!hasPending || reviewing || preflight || distilling) return;
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout>;
     // Re-arm only after the previous refresh settles, so a slow request
@@ -417,7 +429,7 @@ export default function Documents() {
       cancelled = true;
       clearTimeout(timeoutId);
     };
-  }, [hasPending, reviewing, preflight, refreshQuiet]);
+  }, [hasPending, reviewing, preflight, distilling, refreshQuiet]);
 
   // Tick driver (sprint 12): while any statement read is resumable-pending
   // (pending WITH progress — the server parked provider state for it),
@@ -438,7 +450,7 @@ export default function Documents() {
   const tickKey = resumableStatementIds(statements).join(',');
   const tickInFlight = useRef(new Set<string>());
   useEffect(() => {
-    if (tickKey === '' || reviewing || preflight) return;
+    if (tickKey === '' || reviewing || preflight || distilling) return;
     const ids = tickKey.split(',');
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout>;
@@ -460,7 +472,7 @@ export default function Documents() {
       cancelled = true;
       clearTimeout(timeoutId);
     };
-  }, [tickKey, reviewing, preflight, extractStatement]);
+  }, [tickKey, reviewing, preflight, distilling, extractStatement]);
 
   // Stable identity across re-renders (setReviewing from useState never
   // changes) — passed to whichever modal is open so its internal onClose
@@ -514,6 +526,17 @@ export default function Documents() {
       toast('error', 'That statement is no longer available.');
     }
   }, [preflight, documents, toast]);
+
+  // Same defensive cleanup for the distill modal (sprint 19) — the modal
+  // itself flips its own internal cancel token on unmount, so closing here
+  // is enough; there's no worker claim to abort (distillation never takes one).
+  useEffect(() => {
+    if (!distilling) return;
+    if (!documents.some((d) => d.id === distilling.id)) {
+      setDistilling(null);
+      toast('error', 'That document is no longer available.');
+    }
+  }, [distilling, documents, toast]);
 
   // Vanish guard for a browser-pages read: if its document disappears
   // mid-read (deleted, or dropped by a background refresh), flip the cancel
@@ -842,6 +865,18 @@ export default function Documents() {
                   // 2026-08-13: confirmed+truncated left no action at all.
                   statement.status === 'confirmed' ||
                   ((statement.status === 'suggested' || statement.status === 'partial') && proposedCount === 0));
+              // Distillation (sprint 19): turn one AI read into a reusable local
+              // pack. Needs an AI-provider statement (a pack read has nothing to
+              // learn from — provider 'pack' IS already layout knowledge) with
+              // at least DISTILL_MIN_ANCHORS confirmed rows to anchor against.
+              const confirmedRowCount = statement
+                ? statement.rows.filter((r) => r.status === 'confirmed').length
+                : 0;
+              const showDistillAction =
+                isPdf &&
+                !!statement &&
+                statement.provider !== 'pack' &&
+                confirmedRowCount >= DISTILL_MIN_ANCHORS;
               return (
                 <li key={doc.id} className="flex flex-wrap items-center gap-3 py-3">
                   <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
@@ -950,6 +985,17 @@ export default function Documents() {
                     >
                       <Sparkles className="size-3.5" aria-hidden />
                       {statementButtonLabel(statement)}
+                    </Button>
+                  )}
+                  {showDistillAction && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={clientRead !== null || running !== null || distilling !== null}
+                      onClick={() => setDistilling(doc)}
+                    >
+                      <PackagePlus className="size-3.5" aria-hidden />
+                      Create a pack
                     </Button>
                   )}
                   <a
@@ -1077,6 +1123,22 @@ export default function Documents() {
             // as both modals above — a stale draft can never render against
             // a different email's audit trail.
             <InboxConfirmModal key={reviewing.id} item={reviewItem} onClose={closeReview} />
+          );
+        })()}
+
+      {distilling &&
+        (() => {
+          const distillStatement = statements.find((s) => s.documentId === distilling.id);
+          if (!distillStatement) return null;
+          return (
+            // Same keyed-remount discipline as every review modal above — a
+            // stale draft can never render against a different document.
+            <DistillPackModal
+              key={distilling.id}
+              doc={distilling}
+              statement={distillStatement}
+              onClose={() => setDistilling(null)}
+            />
           );
         })()}
     </div>

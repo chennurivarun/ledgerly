@@ -18,6 +18,7 @@ vi.mock('../src/api', () => ({
 import { api } from '../src/api';
 import { createCancelToken, runPackRead } from '../src/components/ai/clientPages';
 import { inKotakSavings } from '../shared/packs/packs/in-kotak-savings';
+import { allStatementPacks, STATEMENT_PACKS } from '../shared/packs/registry';
 import { generateSyntheticStatement } from './helpers/syntheticStatement';
 import type { StatementExtraction } from '../shared/types';
 
@@ -54,7 +55,14 @@ beforeEach(() => {
 describe('pack read end-to-end (real engine, real registry, real fixture)', () => {
   it('detects the Kotak pack, verifies, claims with its id, and finalizes converted rows', async () => {
     const labels: string[] = [];
-    const result = await runPackRead('doc-1', fixture(), false, (l) => labels.push(l), createCancelToken());
+    const result = await runPackRead(
+      'doc-1',
+      fixture(),
+      STATEMENT_PACKS,
+      false,
+      (l: string) => labels.push(l),
+      createCancelToken(),
+    );
 
     expect(result).toBe(SETTLED);
     expect(begin).toHaveBeenCalledWith('doc-1', inKotakSavings.id);
@@ -100,7 +108,7 @@ describe('pack read end-to-end (real engine, real registry, real fixture)', () =
       i === pages.length - 1 ? page.replace(/(\d)(\.\d{2})(?!.*\d\.\d{2})/s, (_, d, tail) => `${(Number(d) + 1) % 10}${tail}`) : page,
     );
 
-    const result = await runPackRead('doc-1', tampered, false, () => undefined, createCancelToken());
+    const result = await runPackRead('doc-1', tampered, STATEMENT_PACKS, false, () => undefined, createCancelToken());
 
     expect(result).toMatchObject({ outcome: 'no-pack' });
     expect((result as { reason: string | null }).reason).toMatch(/balance chain/);
@@ -111,7 +119,32 @@ describe('pack read end-to-end (real engine, real registry, real fixture)', () =
   });
 
   it('a truncated extraction settles the pack read as truncated (loud partial, never silent)', async () => {
-    await runPackRead('doc-1', fixture(), true, () => undefined, createCancelToken());
+    await runPackRead('doc-1', fixture(), STATEMENT_PACKS, true, () => undefined, createCancelToken());
     expect((finalize.mock.calls[0][1] as { truncated: boolean }).truncated).toBe(true);
+  });
+
+  it('a local pack sharing a bundled pack\'s signature makes detection ambiguous through the REAL engine — refuses, never crashes, degrades to the ordinary no-pack fallback (never picks either one by guesswork)', async () => {
+    // Same signature as the bundled Kotak pack, different id — exactly what
+    // a user's own local pack could look like if their bank's layout happens
+    // to match a bundled one's detection strings. The engine's own rule
+    // (shared/packs/spec.ts: "no two packs match one document") fires
+    // identically whether both matches are bundled or one is local — the
+    // detection space is composed by allStatementPacks(local packs), same
+    // as the real Documents.tsx call site.
+    const localClone = { ...inKotakSavings, id: 'in.my-local-clone.savings', name: 'My Local Clone' };
+
+    const result = await runPackRead(
+      'doc-1',
+      fixture(),
+      allStatementPacks([localClone]),
+      false,
+      () => undefined,
+      createCancelToken(),
+    );
+
+    expect(result).toEqual({ outcome: 'no-pack', reason: null });
+    expect(begin).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+    expect(abort).not.toHaveBeenCalled();
   });
 });

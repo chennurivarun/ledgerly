@@ -1,6 +1,9 @@
 // PUT /api/preferences — partial update: only the groups present in the body
 // are touched, every other setting is left exactly as it was (spec §4.5).
 import { CURRENCY_CODES } from '../shared/currencies';
+import { validatePack } from '../shared/packs/engine';
+import { LOCAL_PACK_MAX_BYTES, LOCAL_PACKS_MAX, statementPackById } from '../shared/packs/registry';
+import type { StatementPack } from '../shared/packs/spec';
 import {
   PERIOD_OPTIONS,
   type AiProvider,
@@ -262,6 +265,44 @@ function normalizeRules(raw: unknown): Rule[] {
   }));
 }
 
+/**
+ * User-local statement packs (sprint 19) — full-replacement, reject-wholesale:
+ * one bad pack 400s the ENTIRE update, naming the index (1-based, human
+ * counting) and the rule it broke, never a partial write. `validatePack` is
+ * the REAL engine's structural check (shape, regex compilability, id/
+ * country/currency format) — its reason string is quoted verbatim, same
+ * leak-proof taxonomy as everywhere else a pack reason surfaces. The size
+ * and uniqueness rules layer on top: a pack the engine calls valid can still
+ * be too big to store, or collide with an id already spoken for (another
+ * entry in this same list, or a bundled pack the worker ships).
+ */
+function normalizeLocalStatementPacks(raw: unknown): StatementPack[] {
+  if (!Array.isArray(raw)) throw new ApiFail(400, 'localStatementPacks must be a list of packs.');
+  if (raw.length > LOCAL_PACKS_MAX) {
+    throw new ApiFail(400, `localStatementPacks accepts at most ${LOCAL_PACKS_MAX} packs.`);
+  }
+  const seenIds = new Set<string>();
+  const packs: StatementPack[] = [];
+  raw.forEach((entry, i) => {
+    const reason = validatePack(entry);
+    if (reason) throw new ApiFail(400, `Pack ${i + 1}: ${reason}`);
+    const pack = entry as StatementPack;
+    const bytes = new TextEncoder().encode(JSON.stringify(pack)).length;
+    if (bytes > LOCAL_PACK_MAX_BYTES) {
+      throw new ApiFail(400, `Pack ${i + 1}: exceeds ${LOCAL_PACK_MAX_BYTES} bytes serialized.`);
+    }
+    if (seenIds.has(pack.id)) {
+      throw new ApiFail(400, `Pack ${i + 1}: id "${pack.id}" is already used earlier in this list.`);
+    }
+    if (statementPackById(pack.id) !== null) {
+      throw new ApiFail(400, `Pack ${i + 1}: id "${pack.id}" collides with a bundled pack.`);
+    }
+    seenIds.add(pack.id);
+    packs.push(pack);
+  });
+  return packs;
+}
+
 /** Only known Drive fields are merged in; unrelated Drive metadata survives. */
 function mergeDrive(raw: unknown, current: DriveSyncMeta): DriveSyncMeta {
   if (!isRecord(raw)) throw new ApiFail(400, 'drive must be an object.');
@@ -472,6 +513,11 @@ export async function applyPreferences(db: D1Database, body: unknown): Promise<P
   }
   if ('emailAllowedSenders' in body) {
     patch.emailAllowedSenders = normalizeAllowedSenders(body.emailAllowedSenders);
+  }
+
+  // User-local statement packs (sprint 19): full-replacement, reject-wholesale.
+  if ('localStatementPacks' in body) {
+    patch.localStatementPacks = normalizeLocalStatementPacks(body.localStatementPacks);
   }
 
   // Tags and rules live in their own tables; everything else is a settings row.

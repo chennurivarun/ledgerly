@@ -4,9 +4,11 @@
 import { AlertTriangle, Coins, ExternalLink, FolderSync, Mail, MessageCircle, Radar, RotateCcw, Sparkles, Wallet, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { fmtCurrency } from '../../shared/format';
+import type { StatementPack } from '../../shared/packs/spec';
 import type { AiProvider, BriefingCadence } from '../../shared/types';
 import type { BriefingPreview } from '../api';
 import { CurrencySelect } from '../components/CurrencySelect';
+import { ConfirmDialog } from '../components/manage/ConfirmDialog';
 import { ManagedListSection } from '../components/manage/ManagedListSection';
 import { StatusBadge } from '../components/manage/StatusBadge';
 import { Toggle } from '../components/manage/Toggle';
@@ -119,6 +121,17 @@ export default function Settings() {
         onSaveModel={async (model) => {
           await updatePreferences({ aiModel: model });
           toast('success', 'Model override saved.');
+        }}
+      />
+
+      <LocalPacksSection
+        packs={settings.localStatementPacks}
+        onDelete={async (id) => {
+          // Read fresh at dispatch time — full-replacement saves must not
+          // drop a concurrent change (same rule as every managed list below).
+          const current = useStore.getState().settings.localStatementPacks;
+          await updatePreferences({ localStatementPacks: current.filter((p) => p.id !== id) });
+          toast('success', 'Pack deleted.');
         }}
       />
 
@@ -1083,6 +1096,74 @@ function AiSection({
           )}
         </div>
       </div>
+    </Card>
+  );
+}
+
+/**
+ * User-local statement packs (sprint 19) — packs distilled from this user's
+ * own statements (Documents → "Create a pack"), live for reads immediately.
+ * Full-replacement delete, same discipline as every other managed list on
+ * this page: read the current list fresh at dispatch time, save the filtered
+ * array back whole.
+ */
+function LocalPacksSection({
+  packs,
+  onDelete,
+}: {
+  packs: StatementPack[];
+  onDelete: (id: string) => Promise<void>;
+}) {
+  const [pendingDelete, setPendingDelete] = useState<StatementPack | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onDelete(pendingDelete.id);
+      setPendingDelete(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not delete that pack.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card title="My statement packs">
+      {packs.length === 0 ? (
+        <EmptyState compact title="Packs you distill from your own statements appear here." />
+      ) : (
+        <ul className="divide-y divide-border">
+          {packs.map((pack) => (
+            <li key={pack.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">{pack.name}</p>
+                <p className="mt-0.5 truncate text-xs text-muted">
+                  {pack.id} · {pack.country.toUpperCase()} · {pack.currency}
+                </p>
+              </div>
+              <Button variant="ghost" size="sm" onClick={() => setPendingDelete(pack)}>
+                Delete
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {pendingDelete && (
+        <ConfirmDialog
+          key={pendingDelete.id}
+          title={`Delete "${pendingDelete.name}"?`}
+          message="Statements from this bank will need an AI provider again."
+          busy={busy}
+          error={error}
+          onConfirm={() => void confirmDelete()}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </Card>
   );
 }

@@ -26,7 +26,6 @@
 // rendering is isolated in renderPageToJpeg.
 import { api } from '../../api';
 import { detectPack, parseStatement, toStatementRowInputs } from '../../../shared/packs/engine';
-import { STATEMENT_PACKS } from '../../../shared/packs/registry';
 import type { PackParse, StatementPack } from '../../../shared/packs/spec';
 import {
   CLIENT_STATEMENT_MAX_PAGES,
@@ -451,10 +450,16 @@ async function runAiRoundsRead(
  * canvas, which this module deliberately keeps out of vitest's reach (see
  * the module header) — `texts` lets a test hand this function page content
  * directly instead of a rendered PDF.
+ *
+ * `packs` (sprint 19) is the FULL detection space — bundled packs plus this
+ * user's own distilled ones — so a local pack detects exactly like a
+ * bundled one; the caller builds it via `allStatementPacks(settings.
+ * localStatementPacks)` rather than this module reaching into the store.
  */
 export async function runPackRead(
   documentId: string,
   texts: readonly string[],
+  packs: readonly StatementPack[],
   truncated: boolean,
   onProgress: (label: string) => void,
   token: CancelToken,
@@ -466,7 +471,7 @@ export async function runPackRead(
 
   let pack: StatementPack | null;
   try {
-    pack = detectPack(texts, STATEMENT_PACKS);
+    pack = detectPack(texts, packs);
   } catch {
     return { outcome: 'no-pack', reason: null };
   }
@@ -514,10 +519,12 @@ export async function runPackRead(
  * render, of that page or any scanned page after it, that a pack could
  * never use anyway) → hand the text (and the extraction's own truncation
  * signal) to runPackRead. Cancelling anywhere in here needs no abort —
- * nothing is claimed until runPackRead's own begin call.
+ * nothing is claimed until runPackRead's own begin call. `packs` (sprint 19)
+ * is threaded straight through to runPackRead — see its doc for what it is.
  */
 async function runAutoRead(
   documentId: string,
+  packs: readonly StatementPack[],
   onProgress: (label: string) => void,
   token: CancelToken,
 ): Promise<ClientReadResult> {
@@ -538,7 +545,7 @@ async function runAutoRead(
   onProgress('Checking for a community pack…');
   checkCancelled(token, documentId, null);
 
-  return runPackRead(documentId, extracted.texts, extracted.truncated, onProgress, token);
+  return runPackRead(documentId, extracted.texts, packs, extracted.truncated, onProgress, token);
 }
 
 /**
@@ -548,14 +555,17 @@ async function runAutoRead(
  * extractions rather than sharing one pass — an 'auto' miss is rare, the
  * re-extraction is local and takes seconds, and keeping the two modes
  * independent means neither one's cancellation/claim bookkeeping has to
- * reason about the other's.
+ * reason about the other's. `packs` (sprint 19) is the caller's full
+ * detection space (bundled + this user's local packs) and is only ever
+ * touched by the 'auto' branch — 'ai-rounds' never attempts a pack at all.
  */
 export async function runClientStatementRead(
   documentId: string,
+  packs: readonly StatementPack[],
   onProgress: (label: string) => void,
   token: CancelToken,
   mode: ClientReadMode,
 ): Promise<ClientReadResult> {
-  if (mode === 'auto') return runAutoRead(documentId, onProgress, token);
+  if (mode === 'auto') return runAutoRead(documentId, packs, onProgress, token);
   return runAiRoundsRead(documentId, onProgress, token);
 }
