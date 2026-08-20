@@ -275,9 +275,21 @@ function generalizeLine(line: string, target?: { value: string; name: string }):
  * fix for the repeated-personal-line critical — such lines are excluded
  * outright from furniture and the signature-extra slot, since they're
  * cosmetic for parsing (the oracle's chains never depend on them) but a
- * real privacy risk when they happen to repeat across pages. */
+ * real privacy risk when they happen to repeat across pages.
+ *
+ * The candidate ALSO needs at least one literal word (EM integration fix,
+ * S19 merge): a pattern that is ONLY classes and gaps — the generalized
+ * form of a wrapped row's own `<amount>  <balance>` continuation line — is
+ * indistinguishable across every such row, so with enough wrapped rows it
+ * "repeats" its way into furniture and then breaks every wrapped row's
+ * tail-close (the engine skips furniture even mid-row). Real layout
+ * furniture always carries a label word; a line with structure but no
+ * words is a row fragment, never furniture. */
 function hasStructuralShape(pattern: string): boolean {
-  return GENERALIZATION_TEMPLATE_TOKENS.some((token) => pattern.includes(token));
+  return (
+    GENERALIZATION_TEMPLATE_TOKENS.some((token) => pattern.includes(token)) &&
+    extractLiteralAlphaRuns(pattern).length > 0
+  );
 }
 
 /** The literal alphabetic runs (length >=2) that survive in a generated
@@ -475,7 +487,24 @@ function computeRepeatedPatterns(flat: readonly FlatLine[], totalPages: number):
   }
   const repeated = new Map<string, PatternInfo>();
   for (const [pattern, info] of all) {
-    if (info.pages.size / totalPages >= DISTILL_MIN_ANCHOR_MATCH) repeated.set(pattern, info);
+    if (info.pages.size / totalPages < DISTILL_MIN_ANCHOR_MATCH) continue;
+    // A line ENDING in the row-tail shape can never be layout (real-data
+    // fix, S19 merge, EM): wrapped rows' own `<ref>  <amount>  <balance>`
+    // continuation lines generalize to ONE identical pattern that repeats
+    // on every page exactly like furniture — and carries a word ("UPI"),
+    // so a words-required gate alone doesn't stop it. If such a pattern
+    // shipped as furniture (or header, or signature), the engine's
+    // furniture-skip would swallow every tail before the close-check runs
+    // and no wrapped row could ever close. Tail-matching lines are ROWS,
+    // definitionally — exclude them from the layout-candidate space
+    // entirely, at the one spot all three consumers share.
+    if (info.refs.some((r) => {
+      const m = TAIL_RE.exec(r.text);
+      return m !== null && m.index + m[0].length === r.text.length;
+    })) {
+      continue;
+    }
+    repeated.set(pattern, info);
   }
   return repeated;
 }
@@ -750,12 +779,23 @@ export function distillStatementPack(
     }
     const serialPresent = rowStartCandidates.every((c) => c.hasSerialPrefix);
 
-    // Stage 3 — tail & balance.
-    const tailByCandidate = new Map<number, TailInfo>();
-    for (const c of rowStartCandidates) {
-      const t = findTailForCandidate(flat, c);
-      if (!t) return { ok: false, reason: 'no running balance column found — the v1 pack format needs one' };
-      tailByCandidate.set(c.globalIdx, t);
+    // Stage 3 — tail & balance. An existence check only (the Stage 5 oracle
+    // is what actually proves every row closes): ≥60% of candidate rows
+    // must show the trailing `<amount>  <balance>` pair somewhere before
+    // the NEXT candidate begins. Real-data fix (S19 merge, EM): the
+    // original fixed 4-line window refused an entire 728-row statement over
+    // ONE row whose reference token wrapped across five short fragment
+    // lines — a row's tail can sit any number of wrap-lines down, bounded
+    // only by where the next row starts; and one deviant row must cost at
+    // most its own vote, never the whole distillation.
+    let tailsFound = 0;
+    for (let i = 0; i < rowStartCandidates.length; i++) {
+      const c = rowStartCandidates[i];
+      const nextStart = i + 1 < rowStartCandidates.length ? rowStartCandidates[i + 1].globalIdx : flat.length;
+      if (findTailForCandidate(flat, c, Math.min(nextStart - c.globalIdx, 10))) tailsFound += 1;
+    }
+    if (tailsFound < rowStartCandidates.length * DISTILL_MIN_ANCHOR_MATCH) {
+      return { ok: false, reason: 'no running balance column found — the v1 pack format needs one' };
     }
 
     // Stage 4 — grammar assembly.

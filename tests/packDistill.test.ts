@@ -293,6 +293,72 @@ describe('distillStatementPack — date format transposition', () => {
 // ---------------------------------------------------------------------------
 
 describe('distillStatementPack — privacy', () => {
+  it('tail-shaped lines repeating on every page never become furniture, header, or signature', () => {
+    // EM integration regression (S19 merge, proven on real data): a wrapped
+    // row's own `<ref>  <amount>  <balance>` continuation line generalizes
+    // to ONE identical pattern regardless of values — repeating across
+    // pages exactly like furniture, and (the 'UPIREF' variant) carrying a
+    // word, so a words-required gate alone cannot stop it. If it shipped
+    // as furniture the engine's mid-row skip would swallow every tail and
+    // no wrapped row could close; as header it would eat the table. A line
+    // ENDING in the row-tail shape is a ROW, definitionally — excluded
+    // from the whole layout-candidate space.
+    const pages = injectRepeatedLines(fixture('indian'), [
+      '4,500.00   16,317.25',
+      'UPIREF-000000000001   4,500.00   16,317.25',
+    ]);
+    const result = distillStatementPack(pages, anchorsFrom(SEEDS), IDENTITY);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const tailShaped = (source: string) => source.endsWith('[\\d,]+\\.\\d{2}') || /\[\\d,\]\+\\\.\\d\{2\}\s*$/.test(source);
+    const layoutEntries = [
+      result.pack.table.headerLine,
+      ...result.pack.table.furniture,
+      ...result.pack.signature,
+    ];
+    for (const entry of layoutEntries) {
+      expect(tailShaped(entry)).toBe(false);
+    }
+
+    const wordless = (source: string) => {
+      let stripped = source.replace(/\(\?<[A-Za-z_$][\w$]*>/g, '');
+      for (const token of ['[\\d,]+\\.\\d{2}', '\\d+', '\\s{2,}', '[A-Z][a-z]{2}']) {
+        stripped = stripped.split(token).join('');
+      }
+      return !/[A-Za-z]{2,}/.test(stripped);
+    };
+    for (const entry of result.pack.table.furniture) {
+      expect(wordless(entry)).toBe(false);
+    }
+    for (const entry of result.pack.signature) {
+      expect(wordless(entry)).toBe(false);
+    }
+  });
+
+  it('a deeply wrapped row (tail many lines down) costs one vote, never the whole distillation', () => {
+    // Real-data regression (S19 merge): one row on the real 24-page
+    // statement wrapped its reference token across five short fragment
+    // lines, pushing the tail past the old fixed 4-line window — and the
+    // old all-or-nothing rule refused the entire statement over it. The
+    // window now runs to the next row candidate, and tail existence is a
+    // >=60% vote, not unanimity.
+    const pages = fixture('indian');
+    // Surgically deepen one wrapped row: split its ref-fragment line into
+    // several one-token lines (the tail line itself stays intact).
+    const surgically = pages.map((p) => {
+      const lines = p.split('\n');
+      const idx = lines.findIndex((l) => /^[A-Z]+\/SYNTH TRANSPORT/.test(l));
+      if (idx === -1) return p;
+      const frag = lines[idx];
+      const words = frag.split(' ');
+      lines.splice(idx, 1, ...words.map((w) => w || ' '));
+      return lines.join('\n');
+    });
+    const result = distillStatementPack(surgically, anchorsFrom(SEEDS), IDENTITY);
+    expect(result.ok).toBe(true);
+  });
+
   it('never lets a page-1-only account number or name survive into the pack (structural exclusion: not repeated)', () => {
     const pages = fixture('indian');
     // Insert a person-like name line and a 10-digit account-number-like run

@@ -86,6 +86,11 @@ export function DistillPackModal({
   const [phase, setPhase] = useState<Phase>({ kind: 'form' });
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // The load-bearing human step (S19 review): the distiller enumerates every
+  // literal word that survived generalization into the pack's regexes, and a
+  // machine cannot tell a layout label from a person's name — so the user
+  // must confirm the survivors before the pack can be saved or shared.
+  const [reviewablesConfirmed, setReviewablesConfirmed] = useState(false);
 
   const takenIds = useMemo(
     () => new Set(allStatementPacks(settings.localStatementPacks).map((p) => p.id)),
@@ -171,6 +176,7 @@ export function DistillPackModal({
         // same posture runPackRead takes around the rest of the engine.
         result = { ok: false, reason: 'Could not distill this statement — try again.' };
       }
+      setReviewablesConfirmed(false);
       setPhase({ kind: 'result', result });
     } catch (e) {
       if (e instanceof ClientReadCancelled) {
@@ -296,17 +302,49 @@ export function DistillPackModal({
         {phase.kind === 'result' &&
           (() => {
             const result = phase.result;
+            const needsConfirmation = result.ok && result.reviewables.length > 0;
+            const blocked = needsConfirmation && !reviewablesConfirmed;
             return result.ok ? (
               <div className="space-y-4">
                 <p role="status" className="rounded-lg bg-info-soft px-3 py-2 text-sm text-info">
                   Verified against this statement: {result.proof.rows} rows read,{' '}
                   {result.proof.anchorsMatched}/{result.proof.anchorsTotal} confirmed rows matched.
                 </p>
+                {needsConfirmation && (
+                  <div className="space-y-2 rounded-lg border border-border bg-canvas px-3 py-2.5">
+                    <p className="text-sm font-semibold">
+                      These words from the statement's layout will ship inside the pack:
+                    </p>
+                    <p className="font-mono text-sm">
+                      {result.reviewables.map((r) => r.literalText).join(' · ')}
+                    </p>
+                    <label className="flex items-start gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={reviewablesConfirmed}
+                        onChange={(e) => setReviewablesConfirmed(e.target.checked)}
+                      />
+                      <span>
+                        None of these is personal information — they are labels the bank prints on
+                        every statement.
+                      </span>
+                    </label>
+                  </div>
+                )}
                 <div className="flex flex-wrap gap-2">
-                  <Button onClick={() => void handleSave(result)} loading={saveBusy} disabled={saveBusy}>
+                  <Button
+                    onClick={() => void handleSave(result)}
+                    loading={saveBusy}
+                    disabled={saveBusy || blocked}
+                  >
                     Save to my packs
                   </Button>
-                  <Button variant="ghost" onClick={() => handleDownload(result)} disabled={saveBusy}>
+                  <Button
+                    variant="ghost"
+                    onClick={() => handleDownload(result)}
+                    disabled={saveBusy || blocked}
+                  >
                     Download pack file
                   </Button>
                 </div>

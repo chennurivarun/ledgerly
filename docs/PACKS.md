@@ -174,7 +174,14 @@ refuses the attribution rather than guessing which is "more right."
 3. **What CI runs, and what must pass:**
    - `validatePack(pack)` returns `null` — structural shape, regex
      compilability, named-group presence for every mode the pack declares,
-     and the id/country/currency formats.
+     and the id/country/currency formats. It also rejects the classic
+     catastrophic-backtracking shape (a repeated group whose body itself
+     quantifies or alternates, e.g. `(a+)+` or `(a|b)*` — optional `(...)?`
+     groups stay legal): pack regexes run inside users' browsers on every
+     read, so a pattern that can hang there fails validation, not a user.
+     The check is a heuristic, not a proof — hosts accepting packs from
+     untrusted sources should still treat regex execution as bounded-input
+     work (the engine refuses lines over 2000 characters for this reason).
    - The pack's `signature` matches your generator's page 1, and
      `detectPack` picks it out uniquely from the rest of the bundled
      registry (no ambiguity with an existing pack).
