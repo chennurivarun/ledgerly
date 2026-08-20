@@ -31,6 +31,16 @@ guessing.
 - **Budgets, goals, rules, documents** — monthly budgets with real spend,
   savings goals, plain-language categorization rules, and a document vault
   storing original receipt/statement bytes.
+- **Community statement packs — the Open Bank-Format Commons** — a bank
+  statement PDF from a bank with a bundled parser pack is read
+  **deterministically in your browser**: instant, offline, zero AI, zero
+  cost, no provider configured. A pack read must *verify* before it proposes
+  a single row (serial numbers must increment, the running balance must
+  reconcile to the cent — or the whole read refuses), and verified rows
+  still go through the same review-before-import gate as everything else.
+  Unknown bank? An AI provider (bring your own — NVIDIA Build's free tier,
+  Ollama, Anthropic, Sarvam) bootstraps the first read. Packs are plain
+  reviewable data any project can embed — see [docs/PACKS.md](docs/PACKS.md).
 - **30 display currencies**, a first-run setup wizard, mobile-friendly
   layouts, and a type-`DELETE` full data-erase that actually erases.
 

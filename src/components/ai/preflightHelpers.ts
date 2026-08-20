@@ -59,19 +59,6 @@ export function customMissingConfig(
   return null;
 }
 
-/**
- * Why the active, otherwise-ready provider cannot read PDF statements — the
- * page-level banner copy, or null for the providers that can. Since sprint 16
- * the custom endpoint CAN (the browser-pages flow), so Workers AI is the only
- * ready-but-blocked provider left.
- */
-export function pdfStatementsBlockedCopy(provider: AiProvider): string | null {
-  if (provider === 'workers-ai') {
-    return "PDF statements need the Anthropic or Sarvam provider — Workers AI can't read them.";
-  }
-  return null;
-}
-
 /** "This statement is N page(s) and will be read in M batch(es)." — the dialog's first line. */
 export function preflightSummary(p: Pick<StatementPreflight, 'pages' | 'batches'>): string {
   const pages = `${p.pages} page${p.pages === 1 ? '' : 's'}`;

@@ -371,9 +371,12 @@ export default function Documents() {
       }
       setStatementError({
         id: doc.id,
+        // "could not be read deterministically" on purpose: a reason can come
+        // from a matched pack that refused OR from the pre-detection bail (a
+        // page with no text layer) — the copy must not claim a match happened.
         message:
           result.reason !== null
-            ? `A community pack matched but could not verify this statement (${result.reason}) — connect an AI provider in Settings to read it.`
+            ? `This statement could not be read deterministically (${result.reason}) — connect an AI provider in Settings to read it.`
             : 'No community pack matches this bank yet. Connect an AI provider in Settings to bootstrap the first read.',
       });
       return;

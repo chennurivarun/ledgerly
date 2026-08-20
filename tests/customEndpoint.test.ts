@@ -23,10 +23,7 @@ import {
   selectStatementProvider,
   supportsMime,
 } from '../worker/ai/providers';
-import {
-  customMissingConfig,
-  pdfStatementsBlockedCopy,
-} from '../src/components/ai/preflightHelpers';
+import { customMissingConfig } from '../src/components/ai/preflightHelpers';
 import { applyPreferences, normalizeCustomBaseUrl } from '../worker/preferences';
 import {
   CUSTOM_KEY_SECRET_KEY,
@@ -344,18 +341,6 @@ describe('customMissingConfig', () => {
   it('never fires for other providers', () => {
     expect(customMissingConfig('anthropic', '', null)).toBeNull();
     expect(customMissingConfig('off', '', null)).toBeNull();
-  });
-});
-
-describe('pdfStatementsBlockedCopy', () => {
-  it('names Workers AI for workers-ai', () => {
-    expect(pdfStatementsBlockedCopy('workers-ai')).toMatch(/Workers AI/);
-  });
-
-  it('null for the providers that can read statements — custom included since S16', () => {
-    expect(pdfStatementsBlockedCopy('anthropic')).toBeNull();
-    expect(pdfStatementsBlockedCopy('sarvam')).toBeNull();
-    expect(pdfStatementsBlockedCopy('custom')).toBeNull();
   });
 });
 

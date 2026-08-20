@@ -7,8 +7,9 @@
 // built on it — runAutoRead, runClientStatementRead's 'ai-rounds' mode) stay
 // isolated behind those seams and exercised by the live smoke, not vitest —
 // this file's own header has always drawn that line, and sprint 18 doesn't
-// move it: shared/packs/engine is mocked because its bodies are stubs that
-// throw (Lane A's own S18 contract), not because pdf.js became testable.
+// move it: shared/packs/engine is mocked HERE to pin runPackRead's decision
+// logic in isolation (including how it degrades when the engine throws);
+// tests/packIntegration.test.ts drives the same flow through the REAL engine.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chunkPages,
@@ -31,9 +32,10 @@ import {
   STATEMENT_PAGE_TEXT_MAX_CHARS,
 } from '../shared/types';
 
-// shared/packs/engine's bodies are S18 stubs that throw — NEVER call them
-// for real here (Lane A owns the implementation); this pins the DECISION
-// LOGIC runPackRead wraps around them.
+// The engine is mocked so these tests pin the DECISION LOGIC runPackRead
+// wraps around it — what gets called, what degrades, what never claims —
+// independent of parsing behavior (packIntegration.test.ts covers the
+// real-engine composition).
 vi.mock('../shared/packs/engine', () => ({
   detectPack: vi.fn(),
   parseStatement: vi.fn(),

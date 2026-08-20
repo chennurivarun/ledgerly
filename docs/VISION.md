@@ -137,6 +137,26 @@ code, never as pooled data. Ingestion is suggestion-only, allow-listed, and
 never triggers AI, so a spoofed email can at worst propose a row the user
 rejects.
 
+### The Open Bank-Format Commons ✅ *(shipped August 2026)*
+
+The anti-Plaid thesis, completed for statements: **AI reads a bank once,
+the community inherits a deterministic parser forever.** A statement pack
+is reviewable *data* — a layout grammar, never code — driving one
+well-tested engine that reads a known bank's PDF in the browser: instant,
+offline, zero AI, zero cost, no provider configured. A pack read must
+*verify* before it proposes anything — serial numbers must increment and
+the running balance must reconcile to the cent, or the whole read refuses —
+and even verified rows ride the same review gate as every other source.
+Unknown banks bootstrap through any AI provider once; the resulting layout
+knowledge is distilled into a pack (structure only — never anyone's data)
+and contributed back. The registry is deliberately host-agnostic
+([docs/PACKS.md](PACKS.md)): input is plain per-page text, so Firefly III,
+Actual Budget, or any importer can embed the same packs. Vendors whose
+format knowledge *is* their moat cannot open it without unmaking
+themselves; a commons that grows one contributor at a time is the moat
+they can't buy. Next: distillation UX (derive a draft pack from a
+confirmed AI read) and the one-click contribution flow.
+
 ### Phase 3 — Sustainability and the business wedge
 
 - **Ledgerly Cloud**: first-party hosting for people who don't want to
