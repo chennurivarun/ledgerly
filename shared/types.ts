@@ -2,6 +2,10 @@
 // Client (src/), worker (worker/), and shared libs all import from here.
 // Changing a shape here requires EM sign-off; additive changes only.
 
+// Type-only and mutual with packs/spec.ts's own `import type` of TxType —
+// both edges erase at compile time, so no runtime cycle exists.
+import type { StatementPack } from './packs/spec';
+
 export type TxType = 'expense' | 'income';
 export type TxSource = 'manual' | 'csv' | 'document' | 'google-drive' | 'email';
 
@@ -174,6 +178,16 @@ export interface Settings {
   /** Allowed senders: exact addresses ("alerts@chase.com") or whole domains
    * ("@chase.com"). Matching is case-insensitive on the envelope sender. */
   emailAllowedSenders: string[];
+  /**
+   * User-local statement packs (sprint 19) — packs distilled from this
+   * user's own statements, live for THIS instance immediately (detection
+   * and begin both consult bundled + local), shareable upstream later.
+   * Server-validated on save: every entry passes validatePack, ids are
+   * unique here AND collide with no bundled pack, at most LOCAL_PACKS_MAX
+   * entries of LOCAL_PACK_MAX_BYTES serialized each (shared/packs/registry).
+   * Layout knowledge only — the distiller never emits statement content.
+   */
+  localStatementPacks: StatementPack[];
 }
 
 export type AiProvider = 'off' | 'workers-ai' | 'anthropic' | 'sarvam' | 'custom';
@@ -236,6 +250,7 @@ export function defaultSettings(): Settings {
     lastBriefingSentAt: null,
     emailFeedEnabled: false,
     emailAllowedSenders: [],
+    localStatementPacks: [],
   };
 }
 
@@ -641,6 +656,10 @@ export interface PreferencesUpdate {
   emailFeedEnabled?: boolean;
   /** Full replacement list; exact addresses or "@domain" entries. */
   emailAllowedSenders?: string[];
+  /** Full replacement list of user-local statement packs (sprint 19).
+   * Rejected wholesale (400) unless EVERY entry validates — see the
+   * Settings field's doc for the rules. */
+  localStatementPacks?: StatementPack[];
 }
 
 export interface PreferencesResult {
